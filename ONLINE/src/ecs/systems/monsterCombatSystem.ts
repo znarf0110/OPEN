@@ -19,10 +19,10 @@ const PLAYER_DAMAGE_RATIO = 0.48;
 const MONSTER_DAMAGE_RATIO = 0.58;
 
 const PLAYER_ATTACK_EFFECT =
-  'player-hit';
+  './game-assets/Effect/sword_hit_original.png';
 
 const MONSTER_ATTACK_EFFECT =
-  'dragon-fire';
+  './game-assets/Effect/dragon_fire_breath.png';
 
 function stop(entity: Entity) {
   if (!entity.movement) return;
@@ -84,7 +84,7 @@ function getAttackDuration(
     model?.getActionDuration?.(action) ?? 0;
 
   if (measured > 0.20 && measured < 3.0) {
-    // AnimationSystem plays attacks at 9.5 instead of the old 14.
+    // AnimationSystem plays attacks at 8 instead of the old 14.
     // Convert the authored duration to the new slower playback time.
     return measured * (14 / PLAYER_ATTACK_SPEED);
   }
@@ -483,8 +483,8 @@ export const MonsterCombatSystem: ISystemFactory = world => {
               monster,
               localPlayer,
               MONSTER_ATTACK_EFFECT,
-              0.60,
-              0.90
+              0.70,
+              0.55
             );
           }
         }

@@ -1,7 +1,6 @@
 import {
   Color3,
-  CreateTorus,
-  ParticleSystem,
+  CreatePlane,
   StandardMaterial,
   Texture,
   TransformNode,
@@ -9,265 +8,354 @@ import {
 } from '../../libs/babylon/exports';
 import type { Entity, ISystemFactory } from '../world';
 
-type RingFx = {
-  mesh: any;
+type FireSegment = {
+  plane: any;
   material: StandardMaterial;
-  startScale: number;
+  texture: Texture;
+  distance: number;
+  width: number;
+  height: number;
+  phase: number;
 };
 
-type FireFx = {
+type ActiveEffect = {
   root: TransformNode;
-  rings: RingFx[];
-  particles: ParticleSystem[];
-  start: Vector3;
-  end: Vector3;
+  meshes: any[];
   startedAt: number;
-  travelDuration: number;
   expiresAt: number;
   kind: 'dragon-fire' | 'player-hit';
+  caster?: Entity;
+  target?: Entity;
+  segments?: FireSegment[];
+  mesh?: any;
+  baseWidth?: number;
 };
 
-const FIRE_TEXTURE_DATA =
-  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"%3E%3Cdefs%3E%3CradialGradient id="g" cx="50%25" cy="50%25" r="50%25"%3E%3Cstop offset="0%25" stop-color="white" stop-opacity="1"/%3E%3Cstop offset="55%25" stop-color="white" stop-opacity=".9"/%3E%3Cstop offset="100%25" stop-color="white" stop-opacity="0"/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx="32" cy="32" r="30" fill="url(%23g)"/%3E%3C/svg%3E';
+// Original MU fire artwork extracted from Effect/flamestani.OZJ.
+// The texture is a 4-frame vertical strip. We use it as several small
+// camera-facing fire/smoke pieces that stay attached to the dragon's
+// mouth-to-target line. It is NOT treated as a flying projectile.
+const DRAGON_FIRE_TEXTURE =
+  './game-assets/Effect/dragon_fire_breath.png';
 
-function distance2D(a: Vector3, b: Vector3) {
-  const dx = b.x - a.x;
-  const dz = b.z - a.z;
-  return Math.sqrt(dx * dx + dz * dz);
+const PLAYER_HIT_TEXTURE =
+  './game-assets/Effect/sword_hit_original.png';
+
+function makeSpriteMaterial(
+  name: string,
+  texture: Texture
+) {
+  const material = new StandardMaterial(name, texture.getScene());
+  material.diffuseTexture = texture;
+  material.emissiveTexture = texture;
+  material.diffuseColor = Color3.White();
+  material.emissiveColor = Color3.White();
+  material.specularColor = Color3.Black();
+  material.disableLighting = true;
+  material.backFaceCulling = false;
+  material.useAlphaFromDiffuseTexture = true;
+  material.transparencyMode = 2;
+  material.alpha = 1;
+  return material;
 }
 
-function lerp(a: Vector3, b: Vector3, t: number) {
-  return new Vector3(
-    a.x + (b.x - a.x) * t,
-    a.y + (b.y - a.y) * t,
-    a.z + (b.z - a.z) * t
+function getFlatDirection(caster: Entity, target: Entity) {
+  if (!caster.transform || !target.transform) return null;
+
+  const direction = new Vector3(
+    target.transform.pos.x - caster.transform.pos.x,
+    0,
+    target.transform.pos.z - caster.transform.pos.z
   );
+
+  if (direction.lengthSquared() < 0.0001) return null;
+
+  direction.normalize();
+  return direction;
+}
+
+/**
+ * Finds a practical mouth position without requiring a new monster bone API.
+ *
+ * The Budge Dragon model's Babylon hierarchy gives us a world-space bounding
+ * box. We use its upper body/head region and move a short distance forward.
+ * This is much more accurate than the old fixed y=0.72 position, which caused
+ * the fire to appear at the monster's feet.
+ */
+function getDragonMouthPosition(
+  caster: Entity,
+  direction: Vector3
+) {
+  const fallback = new Vector3(
+    caster.transform!.pos.x + direction.x * 0.48,
+    caster.transform!.pos.y + 1.05,
+    caster.transform!.pos.z + direction.z * 0.48
+  );
+
+  const mesh = caster.modelObject?.gltf?.mesh as any;
+  if (!mesh) return fallback;
+
+  try {
+    const bounds = mesh.getHierarchyBoundingVectors?.(true);
+    if (!bounds) return fallback;
+
+    const min = bounds.min;
+    const max = bounds.max;
+    const height = Math.max(0.01, max.y - min.y);
+
+    // Upper-front part of the Budge Dragon. The fire origin is intentionally
+    // above the torso center so it visually exits the head/mouth area.
+    const mouthY = min.y + height * 0.67;
+    const forward = Math.max(0.20, height * 0.18);
+
+    return new Vector3(
+      caster.transform!.pos.x + direction.x * forward,
+      mouthY,
+      caster.transform!.pos.z + direction.z * forward
+    );
+  } catch {
+    return fallback;
+  }
 }
 
 export const SkillEffectSystem: ISystemFactory = world => {
   const query = world.with('skillEffectRequest');
-  const active: FireFx[] = [];
-  let texture: Texture | null = null;
+  const active: ActiveEffect[] = [];
 
-  function getFireTexture() {
-    if (!texture) {
-      texture = new Texture(FIRE_TEXTURE_DATA, world.scene, true, false);
+  let hitTexture: Texture | null = null;
+
+  // Each fire segment gets its own Texture object because vOffset is
+  // animated independently. The underlying image is still the same
+  // original MU texture.
+  const fireTextures: Texture[] = [];
+
+  function getFireTexture(index: number) {
+    if (!fireTextures[index]) {
+      const texture = new Texture(
+        DRAGON_FIRE_TEXTURE,
+        world.scene,
+        true,
+        false
+      );
+
+      texture.hasAlpha = true;
+      texture.anisotropicFilteringLevel = 2;
+      texture.uScale = 1;
+      texture.vScale = 0.25;
+      texture.vOffset = 0;
+
+      fireTextures[index] = texture;
     }
-    return texture;
+
+    return fireTextures[index];
   }
 
-  function makeMaterial(name: string, color: Color3) {
-    const material = new StandardMaterial(name, world.scene);
-    material.diffuseColor = color;
-    material.emissiveColor = color.scale(1.35);
-    material.specularColor = Color3.Black();
-    material.alpha = 0.95;
-    material.disableLighting = true;
-    return material;
+  function getHitTexture() {
+    if (!hitTexture) {
+      hitTexture = new Texture(
+        PLAYER_HIT_TEXTURE,
+        world.scene,
+        true,
+        false
+      );
+      hitTexture.hasAlpha = true;
+      hitTexture.anisotropicFilteringLevel = 2;
+    }
+
+    return hitTexture;
   }
 
-  function makeRing(
-    root: TransformNode,
-    diameter: number,
-    thickness: number,
-    color: Color3,
-    scale: number,
-    y: number
-  ): RingFx {
-    const material = makeMaterial(
-      `muFxMat_${Math.random().toString(36).slice(2)}`,
-      color
-    );
-
-    const mesh = CreateTorus(
-      `muFxRing_${Math.random().toString(36).slice(2)}`,
-      {
-        diameter,
-        thickness,
-        tessellation: 32,
-      },
-      world.scene
-    );
-
-    mesh.setParent(root);
-    mesh.position.set(0, y, 0);
-    mesh.material = material;
-    mesh.isPickable = false;
-    mesh.alwaysSelectAsActiveMesh = true;
-    mesh.scaling.setAll(scale);
-
-    return { mesh, material, startScale: scale };
-  }
-
-  function makeFireParticles(
-    root: TransformNode,
-    count: number,
-    color1: Color3,
-    color2: Color3,
-    life: number,
-    size: number,
-    emitRate: number
+  function spawnDragonFire(
+    event: NonNullable<Entity['skillEffectRequest']>
   ) {
-    const ps = new ParticleSystem(
-      `muFireParticles_${Math.random().toString(36).slice(2)}`,
-      count,
-      world.scene
+    if (!event.caster?.transform || !event.target?.transform) return;
+
+    const direction = getFlatDirection(
+      event.caster,
+      event.target
+    );
+    if (!direction) return;
+
+    const mouth = getDragonMouthPosition(
+      event.caster,
+      direction
     );
 
-    ps.particleTexture = getFireTexture();
-    ps.emitter = root;
-    ps.minSize = size * 0.45;
-    ps.maxSize = size;
-    ps.minLifeTime = life * 0.55;
-    ps.maxLifeTime = life;
-    ps.emitRate = emitRate;
-    ps.minEmitPower = 0.15;
-    ps.maxEmitPower = 0.55;
-    ps.gravity = new Vector3(0, 0.25, 0);
-    ps.color1 = new Color3(color1.r, color1.g, color1.b);
-    ps.color2 = new Color3(color2.r, color2.g, color2.b);
-    ps.colorDead = new Color3(0.08, 0.08, 0.08);
-    ps.blendMode = ParticleSystem.BLENDMODE_ADD;
-    ps.minAngularSpeed = -3;
-    ps.maxAngularSpeed = 3;
-    ps.start();
+    const target = event.target.transform.pos;
+    const distance = Math.sqrt(
+      (target.x - mouth.x) ** 2 +
+      (target.z - mouth.z) ** 2
+    );
 
-    return ps;
+    // The breath is deliberately short. It should look like a cone/stream
+    // leaving the mouth, not like a projectile travelling across the map.
+    const breathLength = Math.min(
+      2.05,
+      Math.max(0.75, distance * 0.82)
+    );
+
+    const root = new TransformNode(
+      `muDragonBreath_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`,
+      world.scene
+    );
+    root.setParent(world.mapParent);
+    root.position.copyFrom(mouth);
+    root.rotation.y = Math.atan2(
+      direction.x,
+      direction.z
+    );
+
+    const segments: FireSegment[] = [];
+    const meshes: any[] = [];
+
+    // Four compact pieces make one continuous breath. They overlap slightly
+    // so the fire reads as smoke/flame coming out of the mouth.
+    const layout = [
+      { at: 0.12, width: 0.62, height: 0.30, phase: 0 },
+      { at: 0.38, width: 0.58, height: 0.28, phase: 1 },
+      { at: 0.64, width: 0.50, height: 0.25, phase: 2 },
+      { at: 0.86, width: 0.40, height: 0.21, phase: 3 },
+    ];
+
+    layout.forEach((item, index) => {
+      const texture = getFireTexture(index);
+      const material = makeSpriteMaterial(
+        `muDragonBreathMaterial_${Date.now()}_${index}`,
+        texture
+      );
+
+      const plane = CreatePlane(
+        `muDragonBreath_${Date.now()}_${index}`,
+        { width: 1, height: 1 },
+        world.scene
+      );
+
+      plane.setParent(root);
+      plane.position.set(
+        0,
+        0,
+        breathLength * item.at
+      );
+      plane.billboardMode = 7;
+      plane.isPickable = false;
+      plane.alwaysSelectAsActiveMesh = true;
+      plane.material = material;
+      plane.scaling.set(
+        item.width,
+        item.height,
+        1
+      );
+
+      // Small variation keeps the original frame art from looking like four
+      // identical cards pasted in a straight line.
+      plane.rotation.z =
+        (index % 2 === 0 ? -1 : 1) * 0.08;
+
+      meshes.push(plane);
+      segments.push({
+        plane,
+        material,
+        texture,
+        distance: breathLength * item.at,
+        width: item.width,
+        height: item.height,
+        phase: item.phase,
+      });
+    });
+
+    const now =
+      world.gameTime.TotalGameTime.TotalSeconds;
+
+    active.push({
+      root,
+      meshes,
+      startedAt: now,
+      expiresAt: now + 0.52,
+      kind: 'dragon-fire',
+      caster: event.caster,
+      target: event.target,
+      segments,
+    });
   }
 
-  function spawnPlayerHit(event: NonNullable<Entity['skillEffectRequest']>) {
+  function spawnPlayerHit(
+    event: NonNullable<Entity['skillEffectRequest']>
+  ) {
     if (!event.target?.transform) return;
 
     const p = event.target.transform.pos;
     const root = new TransformNode(
-      `muPlayerHit_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      `muSwordOriginal_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`,
       world.scene
     );
-
     root.setParent(world.mapParent);
-    root.position.set(p.x, p.y + 0.95, p.z);
-    root.scaling.setAll((event.scale ?? 0.72) * 1.15);
+    root.position.set(p.x, p.y + 0.88, p.z);
 
-    const rings = [
-      makeRing(root, 1.55, 0.085, new Color3(1, 0.78, 0.15), 0.42, 0),
-      makeRing(root, 1.1, 0.06, new Color3(1, 0.28, 0.03), 0.36, 0.05),
-    ];
-
-    rings[0].mesh.rotation.z = Math.PI * 0.15;
-    rings[0].mesh.rotation.y = Math.PI * 0.35;
-    rings[0].mesh.scaling.set(1.55, 0.22, 0.38);
-
-    rings[1].mesh.rotation.z = -Math.PI * 0.20;
-    rings[1].mesh.rotation.y = -Math.PI * 0.25;
-    rings[1].mesh.scaling.set(1.15, 0.18, 0.28);
-
-    const particles = makeFireParticles(
-      root,
-      20,
-      new Color3(1, 0.95, 0.45),
-      new Color3(1, 0.22, 0.02),
-      0.28,
-      0.32,
-      55
+    const plane = CreatePlane(
+      `muSwordOriginalHit_${Date.now()}`,
+      { width: 1, height: 1 },
+      world.scene
     );
+    plane.setParent(root);
+    plane.billboardMode = 7;
+    plane.isPickable = false;
+    plane.alwaysSelectAsActiveMesh = true;
 
-    const now = world.gameTime.TotalGameTime.TotalSeconds;
+    const material = makeSpriteMaterial(
+      `muSwordOriginalMaterial_${Date.now()}`,
+      getHitTexture()
+    );
+    plane.material = material;
+
+    const scale = event.scale ?? 0.62;
+    plane.scaling.set(
+      0.82 * scale,
+      0.82 * scale,
+      1
+    );
+    plane.rotation.z =
+      Math.random() * 0.45 - 0.225 +
+      Math.PI * 0.25;
+
+    const now =
+      world.gameTime.TotalGameTime.TotalSeconds;
+
     active.push({
       root,
-      rings,
-      particles: [particles],
-      start: root.position.clone(),
-      end: root.position.clone(),
+      meshes: [plane],
+      mesh: plane,
       startedAt: now,
-      travelDuration: 0,
-      expiresAt: now + 0.42,
+      expiresAt: now + 0.22,
       kind: 'player-hit',
+      baseWidth: 0.82 * scale,
     });
   }
 
-  function spawnDragonFire(event: NonNullable<Entity['skillEffectRequest']>) {
-    if (!event.caster?.transform || !event.target?.transform) return;
-
-    const caster = event.caster.transform.pos;
-    const target = event.target.transform.pos;
-
-    // Start near the dragon's chest/mouth and finish at the player's torso.
-    const start = new Vector3(caster.x, caster.y + 1.05, caster.z);
-    const end = new Vector3(target.x, target.y + 0.95, target.z);
-    const travel = Math.min(0.52, Math.max(0.20, distance2D(start, end) * 0.075));
-
-    const root = new TransformNode(
-      `muDragonFire_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      world.scene
-    );
-    root.setParent(world.mapParent);
-
-    // The root itself travels from dragon -> player. The child rings and
-    // particles make the projectile look like a compact flame/smoke stream.
-    const rings = [
-      makeRing(root, 0.82, 0.12, new Color3(1, 0.18, 0.01), 0.55, 0),
-      makeRing(root, 0.55, 0.09, new Color3(1, 0.72, 0.06), 0.48, 0.02),
-      makeRing(root, 1.15, 0.10, new Color3(0.18, 0.12, 0.08), 0.28, 0.02),
-    ];
-
-    rings[0].mesh.scaling.set(0.9, 0.9, 1.6);
-    rings[1].mesh.scaling.set(0.75, 0.75, 1.8);
-    rings[2].mesh.scaling.set(0.95, 0.95, 0.45);
-
-    const fire = makeFireParticles(
-      root,
-      36,
-      new Color3(1, 0.95, 0.55),
-      new Color3(1, 0.12, 0.01),
-      0.35,
-      0.42,
-      80
-    );
-
-    const smoke = makeFireParticles(
-      root,
-      18,
-      new Color3(0.16, 0.13, 0.10),
-      new Color3(0.035, 0.03, 0.025),
-      0.60,
-      0.50,
-      25
-    );
-
-    const now = world.gameTime.TotalGameTime.TotalSeconds;
-    root.position.copyFrom(start);
-
-    active.push({
-      root,
-      rings,
-      particles: [fire, smoke],
-      start,
-      end,
-      startedAt: now,
-      travelDuration: travel,
-      expiresAt: now + travel + 0.45,
-      kind: 'dragon-fire',
-    });
-  }
-
-  function spawn(event: NonNullable<Entity['skillEffectRequest']>) {
-    if (event.modelPath === 'dragon-fire') {
+  function spawn(
+    event: NonNullable<Entity['skillEffectRequest']>
+  ) {
+    if (event.modelPath === DRAGON_FIRE_TEXTURE) {
       spawnDragonFire(event);
       return;
     }
 
-    spawnPlayerHit(event);
+    if (event.modelPath === PLAYER_HIT_TEXTURE) {
+      spawnPlayerHit(event);
+    }
   }
 
-  function dispose(effect: FireFx) {
-    for (const ring of effect.rings) {
-      ring.mesh.dispose(false, false);
-      ring.material.dispose();
-    }
+  function dispose(effect: ActiveEffect) {
+    for (const mesh of effect.meshes) {
+      const material = mesh.material;
+      mesh.dispose(false, false);
 
-    for (const ps of effect.particles) {
-      ps.stop();
-      ps.dispose();
+      if (material) {
+        material.dispose();
+      }
     }
 
     effect.root.dispose();
@@ -275,13 +363,17 @@ export const SkillEffectSystem: ISystemFactory = world => {
 
   return {
     update: () => {
-      const now = world.gameTime.TotalGameTime.TotalSeconds;
+      const now =
+        world.gameTime.TotalGameTime.TotalSeconds;
 
       for (const entity of [...query]) {
         const event = entity.skillEffectRequest;
         if (!event) continue;
 
-        world.removeComponent(entity, 'skillEffectRequest');
+        world.removeComponent(
+          entity,
+          'skillEffectRequest'
+        );
         spawn(event);
       }
 
@@ -290,36 +382,96 @@ export const SkillEffectSystem: ISystemFactory = world => {
         const age = now - effect.startedAt;
 
         if (effect.kind === 'dragon-fire') {
-          const t = Math.min(1, Math.max(0, age / effect.travelDuration));
-          const eased = 1 - Math.pow(1 - t, 3);
-          effect.root.position.copyFrom(lerp(effect.start, effect.end, eased));
+          const caster = effect.caster;
+          const target = effect.target;
 
-          const fade = age > effect.travelDuration
-            ? Math.max(0, 1 - (age - effect.travelDuration) / 0.45)
-            : 1;
-
-          effect.root.scaling.setAll(0.85 + t * 0.28);
-          effect.rings[0].material.alpha = 0.92 * fade;
-          effect.rings[1].material.alpha = 0.95 * fade;
-          effect.rings[2].material.alpha = 0.55 * fade;
-          effect.root.rotation.z += 0.20;
-          effect.root.rotation.y += 0.14;
-
-          if (age >= effect.travelDuration) {
-            // Turn the projectile into a short body-hit burst.
-            effect.rings[0].mesh.scaling.set(1.5, 1.5, 1.5);
-            effect.rings[1].mesh.scaling.set(1.2, 1.2, 1.2);
-            effect.rings[2].mesh.scaling.set(1.6, 1.6, 1.0);
+          if (!caster?.transform || !target?.transform) {
+            dispose(effect);
+            active.splice(i, 1);
+            continue;
           }
+
+          const direction = getFlatDirection(
+            caster,
+            target
+          );
+
+          if (!direction) {
+            dispose(effect);
+            active.splice(i, 1);
+            continue;
+          }
+
+          // Recalculate the mouth every frame. This makes the breath follow
+          // the dragon instead of flying independently like a thrown object.
+          const mouth = getDragonMouthPosition(
+            caster,
+            direction
+          );
+          effect.root.position.copyFrom(mouth);
+          effect.root.rotation.y = Math.atan2(
+            direction.x,
+            direction.z
+          );
+
+          const fadeIn = Math.min(1, age / 0.06);
+          const fadeOut =
+            age > 0.40
+              ? Math.max(0, 1 - (age - 0.40) / 0.12)
+              : 1;
+
+          const pulse =
+            0.94 +
+            Math.sin(age * 42) * 0.07;
+
+          effect.segments?.forEach(
+            (segment, index) => {
+              const frame =
+                (Math.floor(age / 0.10) +
+                  segment.phase) % 4;
+
+              segment.texture.vOffset =
+                frame * 0.25;
+
+              segment.material.alpha =
+                fadeIn * fadeOut * pulse;
+
+              const grow =
+                0.92 +
+                Math.min(0.08, age * 0.18);
+
+              segment.plane.scaling.set(
+                segment.width * grow,
+                segment.height * grow,
+                1
+              );
+            }
+          );
         } else {
-          const progress = Math.min(1, Math.max(0, age / 0.42));
-          const ease = 1 - Math.pow(1 - progress, 2);
-          effect.root.scaling.setAll(0.95 + ease * 0.25);
-          effect.root.rotation.y += 0.28;
+          const t = Math.min(
+            1,
+            Math.max(0, age / 0.22)
+          );
 
-          for (const ring of effect.rings) {
-            ring.material.alpha = 0.95 * (1 - progress);
+          const material =
+            effect.mesh?.material as
+              | StandardMaterial
+              | undefined;
+
+          if (material) {
+            material.alpha =
+              0.95 * (1 - t);
           }
+
+          const scale =
+            (effect.baseWidth ?? 0.5) *
+            (0.76 + 0.30 * t);
+
+          effect.mesh?.scaling.set(
+            scale,
+            scale,
+            1
+          );
         }
 
         if (now >= effect.expiresAt) {

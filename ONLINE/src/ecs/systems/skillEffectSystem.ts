@@ -13,6 +13,7 @@ type FireSegment = {
   material: StandardMaterial;
   texture: Texture;
   distance: number;
+  at: number;
   width: number;
   height: number;
   phase: number;
@@ -31,10 +32,9 @@ type ActiveEffect = {
   baseWidth?: number;
 };
 
-// Original MU fire artwork extracted from Effect/flamestani.OZJ.
-// The texture is a 4-frame vertical strip. We use it as several small
-// camera-facing fire/smoke pieces that stay attached to the dragon's
-// mouth-to-target line. It is NOT treated as a flying projectile.
+// VERIFIED from the supplied original MU Effect.zip:
+// Effect/flamestani.OZJ is a horizontal fire-breath strip (256x256).
+// The image contains four fire frames stacked vertically.
 const DRAGON_FIRE_TEXTURE =
   './game-assets/Effect/dragon_fire_breath.png';
 
@@ -74,48 +74,137 @@ function getFlatDirection(caster: Entity, target: Entity) {
   return direction;
 }
 
+function rotateY(v: Vector3, yaw: number) {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+
+  return new Vector3(
+    v.x * c - v.z * s,
+    v.y,
+    v.x * s + v.z * c
+  );
+}
+
+function getVisualOrigin(caster: Entity) {
+  const p = caster.transform!.pos;
+  const offset = caster.transform!.posOffset;
+
+  return new Vector3(
+    p.x + (offset?.x ?? 0),
+    p.y + (offset?.y ?? 0),
+    p.z + (offset?.z ?? 0)
+  );
+}
+
 /**
- * Finds a practical mouth position without requiring a new monster bone API.
+ * Find the actual animated head/mouth-side bone instead of guessing from
+ * the monster bounding box.
  *
- * The Budge Dragon model's Babylon hierarchy gives us a world-space bounding
- * box. We use its upper body/head region and move a short distance forward.
- * This is much more accurate than the old fixed y=0.72 position, which caused
- * the fire to appear at the monster's feet.
+ * Monster03.glb is the Budge Dragon model. Its modelObject exposes the
+ * Babylon skeleton, so the effect can use the animated bone positions.
+ * This fixes the old problem where hierarchy bounds placed the fire at the
+ * monster's feet because the GLB has a -Y scale + -PI/2 X conversion.
  */
 function getDragonMouthPosition(
   caster: Entity,
   direction: Vector3
 ) {
-  const fallback = new Vector3(
-    caster.transform!.pos.x + direction.x * 0.48,
-    caster.transform!.pos.y + 1.05,
-    caster.transform!.pos.z + direction.z * 0.48
+  const transform = caster.transform!;
+  const visualOrigin = getVisualOrigin(caster);
+  const skeleton = caster.modelObject?.gltf?.skeleton;
+
+  if (!skeleton || skeleton.bones.length === 0) {
+    return new Vector3(
+      visualOrigin.x + direction.x * 0.32,
+      visualOrigin.y + 0.62,
+      visualOrigin.z + direction.z * 0.32
+    );
+  }
+
+  const modelYaw =
+    Math.PI * 2 - (transform.rot?.y ?? 0);
+
+  const candidates: Array<{
+    boneIndex: number;
+    local: Vector3;
+    score: number;
+  }> = [];
+
+  const locals: Vector3[] = [];
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < skeleton.bones.length; i++) {
+    const node = skeleton.bones[i]?.getTransformNode();
+    if (!node) continue;
+
+    node.computeWorldMatrix(true);
+    const worldPos = node.getAbsolutePosition();
+    const worldRelative = worldPos.subtract(visualOrigin);
+    const local = rotateY(worldRelative, -modelYaw);
+
+    locals.push(local);
+    minY = Math.min(minY, local.y);
+    maxY = Math.max(maxY, local.y);
+  }
+
+  const height = Math.max(0.001, maxY - minY);
+
+  for (let i = 0; i < locals.length; i++) {
+    const local = locals[i];
+    const yNorm = (local.y - minY) / height;
+    const horizontal = Math.hypot(local.x, local.z);
+
+    // Mouth/head area: above the torso, but below the very top/horns.
+    if (yNorm < 0.52 || yNorm > 0.90) continue;
+
+    // The Budge Dragon's mouth is on the forward side of the head.
+    // Prefer bones with positive local-Z and reject bones buried in the body.
+    const forwardNorm = local.z / Math.max(0.05, height);
+    const sideNorm = Math.abs(local.x) / Math.max(0.05, height);
+
+    const yPreference =
+      1 - Math.abs(yNorm - 0.70) / 0.20;
+
+    const score =
+      yPreference * 2.0 +
+      forwardNorm * 4.0 -
+      sideNorm * 1.2 +
+      Math.min(horizontal / height, 1) * 0.15;
+
+    candidates.push({
+      boneIndex: i,
+      local,
+      score,
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  const best = candidates[0];
+  if (!best) {
+    return new Vector3(
+      visualOrigin.x + direction.x * 0.32,
+      visualOrigin.y + 0.62,
+      visualOrigin.z + direction.z * 0.32
+    );
+  }
+
+  // Keep the effect just outside the mouth so the fire texture does not
+  // clip through the dragon's head.
+  const mouthLocal = best.local.add(
+    new Vector3(0, 0.015 * height, 0.055 * height)
   );
 
-  const mesh = caster.modelObject?.gltf?.mesh as any;
-  if (!mesh) return fallback;
+  const mouthWorld =
+    visualOrigin.add(rotateY(mouthLocal, modelYaw));
 
-  try {
-    const bounds = mesh.getHierarchyBoundingVectors?.(true);
-    if (!bounds) return fallback;
+  // The selected bone is the authoritative origin. Only a very small
+  // directional push is added; the old large forward offset is gone.
+  mouthWorld.x += direction.x * 0.06;
+  mouthWorld.z += direction.z * 0.06;
 
-    const min = bounds.min;
-    const max = bounds.max;
-    const height = Math.max(0.01, max.y - min.y);
-
-    // Upper-front part of the Budge Dragon. The fire origin is intentionally
-    // above the torso center so it visually exits the head/mouth area.
-    const mouthY = min.y + height * 0.67;
-    const forward = Math.max(0.20, height * 0.18);
-
-    return new Vector3(
-      caster.transform!.pos.x + direction.x * forward,
-      mouthY,
-      caster.transform!.pos.z + direction.z * forward
-    );
-  } catch {
-    return fallback;
-  }
+  return mouthWorld;
 }
 
 export const SkillEffectSystem: ISystemFactory = world => {
@@ -123,10 +212,6 @@ export const SkillEffectSystem: ISystemFactory = world => {
   const active: ActiveEffect[] = [];
 
   let hitTexture: Texture | null = null;
-
-  // Each fire segment gets its own Texture object because vOffset is
-  // animated independently. The underlying image is still the same
-  // original MU texture.
   const fireTextures: Texture[] = [];
 
   function getFireTexture(index: number) {
@@ -187,11 +272,9 @@ export const SkillEffectSystem: ISystemFactory = world => {
       (target.z - mouth.z) ** 2
     );
 
-    // The breath is deliberately short. It should look like a cone/stream
-    // leaving the mouth, not like a projectile travelling across the map.
     const breathLength = Math.min(
-      2.05,
-      Math.max(0.75, distance * 0.82)
+      2.15,
+      Math.max(0.65, distance * 0.78)
     );
 
     const root = new TransformNode(
@@ -210,13 +293,13 @@ export const SkillEffectSystem: ISystemFactory = world => {
     const segments: FireSegment[] = [];
     const meshes: any[] = [];
 
-    // Four compact pieces make one continuous breath. They overlap slightly
-    // so the fire reads as smoke/flame coming out of the mouth.
+    // The original flamestani artwork is already a horizontal fire streak.
+    // Fewer, larger pieces make it read as one breath instead of four balls.
     const layout = [
-      { at: 0.12, width: 0.62, height: 0.30, phase: 0 },
-      { at: 0.38, width: 0.58, height: 0.28, phase: 1 },
-      { at: 0.64, width: 0.50, height: 0.25, phase: 2 },
-      { at: 0.86, width: 0.40, height: 0.21, phase: 3 },
+      { at: 0.05, width: 0.78, height: 0.34, phase: 0 },
+      { at: 0.30, width: 0.72, height: 0.31, phase: 1 },
+      { at: 0.55, width: 0.62, height: 0.27, phase: 2 },
+      { at: 0.78, width: 0.50, height: 0.23, phase: 3 },
     ];
 
     layout.forEach((item, index) => {
@@ -248,17 +331,13 @@ export const SkillEffectSystem: ISystemFactory = world => {
         1
       );
 
-      // Small variation keeps the original frame art from looking like four
-      // identical cards pasted in a straight line.
-      plane.rotation.z =
-        (index % 2 === 0 ? -1 : 1) * 0.08;
-
       meshes.push(plane);
       segments.push({
         plane,
         material,
         texture,
         distance: breathLength * item.at,
+        at: item.at,
         width: item.width,
         height: item.height,
         phase: item.phase,
@@ -272,7 +351,7 @@ export const SkillEffectSystem: ISystemFactory = world => {
       root,
       meshes,
       startedAt: now,
-      expiresAt: now + 0.52,
+      expiresAt: now + 0.58,
       kind: 'dragon-fire',
       caster: event.caster,
       target: event.target,
@@ -402,8 +481,6 @@ export const SkillEffectSystem: ISystemFactory = world => {
             continue;
           }
 
-          // Recalculate the mouth every frame. This makes the breath follow
-          // the dragon instead of flying independently like a thrown object.
           const mouth = getDragonMouthPosition(
             caster,
             direction
@@ -414,20 +491,29 @@ export const SkillEffectSystem: ISystemFactory = world => {
             direction.z
           );
 
-          const fadeIn = Math.min(1, age / 0.06);
+          const targetPos = target.transform.pos;
+          const distance = Math.sqrt(
+            (targetPos.x - mouth.x) ** 2 +
+            (targetPos.z - mouth.z) ** 2
+          );
+          const breathLength = Math.min(
+            2.15,
+            Math.max(0.65, distance * 0.78)
+          );
+
+          const fadeIn = Math.min(1, age / 0.05);
           const fadeOut =
-            age > 0.40
-              ? Math.max(0, 1 - (age - 0.40) / 0.12)
+            age > 0.44
+              ? Math.max(0, 1 - (age - 0.44) / 0.14)
               : 1;
 
           const pulse =
-            0.94 +
-            Math.sin(age * 42) * 0.07;
+            0.96 + Math.sin(age * 38) * 0.04;
 
           effect.segments?.forEach(
-            (segment, index) => {
+            segment => {
               const frame =
-                (Math.floor(age / 0.10) +
+                (Math.floor(age / 0.095) +
                   segment.phase) % 4;
 
               segment.texture.vOffset =
@@ -436,15 +522,8 @@ export const SkillEffectSystem: ISystemFactory = world => {
               segment.material.alpha =
                 fadeIn * fadeOut * pulse;
 
-              const grow =
-                0.92 +
-                Math.min(0.08, age * 0.18);
-
-              segment.plane.scaling.set(
-                segment.width * grow,
-                segment.height * grow,
-                1
-              );
+              segment.plane.position.z =
+                breathLength * segment.at;
             }
           );
         } else {

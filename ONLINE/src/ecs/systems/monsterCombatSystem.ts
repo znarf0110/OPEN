@@ -8,16 +8,20 @@ import type { PlayerObject } from '../../common/playerObject';
 const PLAYER_DAMAGE = 10;
 const MONSTER_DAMAGE = 5;
 
-const PLAYER_ATTACK_COOLDOWN = 0.12;
+const PLAYER_ATTACK_COOLDOWN = 0.45;
+const PLAYER_ATTACK_SPEED = 8;
+const MONSTER_DEATH_DURATION = 1.5;
+const MONSTER_REGEN_DELAY = 2.0;
+const MONSTER_REGEN_PER_SECOND = 12;
 
 const PLAYER_DAMAGE_RATIO = 0.48;
 const MONSTER_DAMAGE_RATIO = 0.58;
 
 const PLAYER_ATTACK_EFFECT =
-  './game-assets/Effect/shockwave_spin01.glb';
+  'Effect/shockwave_spin01.glb';
 
 const MONSTER_ATTACK_EFFECT =
-  './game-assets/Effect/FlameStrike.glb';
+  'Effect/FlameStrike.glb';
 
 function stop(entity: Entity) {
   if (!entity.movement) return;
@@ -79,11 +83,35 @@ function getAttackDuration(
     model?.getActionDuration?.(action) ?? 0;
 
   if (measured > 0.20 && measured < 3.0) {
-    return measured;
+    // AnimationSystem plays attacks at 9.5 instead of the old 14.
+    // Convert the authored duration to the new slower playback time.
+    return measured * (14 / PLAYER_ATTACK_SPEED);
   }
 
   // Safe fallback for old/invalid GLBs.
-  return 0.72;
+  return 0.72 * (14 / PLAYER_ATTACK_SPEED);
+}
+
+function playerIsManuallyMoving(
+  world: Parameters<ISystemFactory>[0],
+  player: Entity
+) {
+  // Mouse ground movement: PointerInput/PlayerController keeps this
+  // true while the player is manually moving.
+  if (world.pointerPressed) return true;
+
+  // WASD movement: cancel combat as soon as the user takes control.
+  const pressedKeys = world.keyboardInput?.pressedKeys;
+  if (pressedKeys) {
+    return (
+      pressedKeys.has('KeyW') ||
+      pressedKeys.has('KeyA') ||
+      pressedKeys.has('KeyS') ||
+      pressedKeys.has('KeyD')
+    );
+  }
+
+  return false;
 }
 
 function requestEffect(
@@ -128,9 +156,13 @@ export const MonsterCombatSystem: ISystemFactory = world => {
   );
 
   let playerAttackSequence = 0;
+  const lastDamageAt = new WeakMap<object, number>();
+  const deathRemovalAt = new WeakMap<object, number>();
+  const pendingRemoval: Entity[] = [];
+  const queuedForRemoval = new WeakSet<object>();
 
   return {
-    update: () => {
+    update: (dt: number) => {
       const now =
         world.gameTime.TotalGameTime.TotalSeconds;
 
@@ -142,6 +174,28 @@ export const MonsterCombatSystem: ISystemFactory = world => {
       for (const player of players) {
         const combat = player.playerCombat;
         const target = combat.target;
+
+        // Manual movement always wins over auto-combat. This prevents
+        // the player from being pulled back to the monster after the
+        // first attack.
+        if (target && !combat.attacking && playerIsManuallyMoving(world, player)) {
+          if (target.monsterAI?.target === player) {
+            target.monsterAI.target = null;
+            target.monsterAI.lured = false;
+            target.monsterAI.state = 'return';
+            target.monsterAI.nextDecisionAt = now;
+            target.monsterAI.attackUntil = 0;
+            target.monsterAI.damageAt = 0;
+            target.monsterAI.damageApplied = false;
+          }
+
+          combat.attacking = false;
+          combat.target = null;
+          combat.attackUntil = 0;
+          combat.damageAt = 0;
+          combat.damageApplied = false;
+          continue;
+        }
 
         if (!target?.transform || !target.monsterHealth) {
           combat.attacking = false;
@@ -233,6 +287,8 @@ export const MonsterCombatSystem: ISystemFactory = world => {
                   PLAYER_DAMAGE
               );
 
+            lastDamageAt.set(target, now);
+
             world.addComponent(
               target,
               'damageNumber',
@@ -265,8 +321,24 @@ export const MonsterCombatSystem: ISystemFactory = world => {
                 ai.attackUntil = 0;
                 ai.damageAt = 0;
                 ai.damageApplied = false;
+                // Keep the monster in the world briefly so the death
+                // animation can be seen, then remove it for real.
+                const deathAnimationDuration =
+                  target.modelObject?.getActionDuration?.(
+                    MonsterActionType.Die
+                  ) ?? 0;
+
+                const visibleDeathTime = Math.max(
+                  MONSTER_DEATH_DURATION,
+                  deathAnimationDuration + 0.25
+                );
+
                 ai.deathUntil =
-                  now + 1.5;
+                  now + visibleDeathTime;
+                deathRemovalAt.set(
+                  target,
+                  ai.deathUntil
+                );
               }
 
               stop(target);
@@ -303,10 +375,66 @@ export const MonsterCombatSystem: ISystemFactory = world => {
       }
 
       // ==========================================================
-      // MONSTER -> PLAYER
+      // MONSTER LIFECYCLE: DEATH + HP REGEN
       // ==========================================================
       for (const monster of monsters) {
         const ai = monster.monsterAI;
+        const health = monster.monsterHealth;
+
+        if (!ai || !health) continue;
+
+        // Keep the death animation alive long enough to be seen.
+        // MonsterAISystem may change its state back to idle, so the
+        // animation system also checks HP <= 0 and forces Die.
+        if (health.current <= 0) {
+          stop(monster);
+          monster.monsterAnimation.action = MonsterActionType.Die;
+
+          const removeAt =
+            deathRemovalAt.get(monster) ??
+            ai.deathUntil ??
+            (now + MONSTER_DEATH_DURATION);
+
+          if (now >= removeAt && !queuedForRemoval.has(monster)) {
+            queuedForRemoval.add(monster);
+
+            // Hide first, then dispose the actual Babylon model.
+            if (monster.modelObject) {
+              monster.modelObject.Visible = false;
+              monster.modelObject.OutOfView = true;
+
+              if (monster.modelObject.gltf?.mesh) {
+                monster.modelObject.gltf.mesh.dispose(false, true);
+              }
+
+              monster.modelObject.gltf?.animationGroups.forEach(group => {
+                if (group.isPlaying) group.stop();
+              });
+            }
+
+            pendingRemoval.push(monster);
+          }
+
+          continue;
+        }
+
+        // Regenerate only after the player has disengaged.
+        // The player movement code clears the monster AI target, which
+        // lets this condition become true after the regen delay.
+        if (health.current < health.max && !ai.target) {
+          const damagedAt = lastDamageAt.get(monster) ?? now;
+
+          if (now - damagedAt >= MONSTER_REGEN_DELAY) {
+            health.current = Math.min(
+              health.max,
+              health.current + MONSTER_REGEN_PER_SECOND * Math.max(0, dt)
+            );
+          }
+        }
+
+        // ==========================================================
+        // MONSTER -> PLAYER
+        // ==========================================================
 
         if (
           !ai ||
@@ -354,6 +482,26 @@ export const MonsterCombatSystem: ISystemFactory = world => {
         // IMPORTANT:
         // Monster AI owns its attack/chase state.
         // Do not reset ai.state here.
+      }
+
+      // Remove dead monsters only after their death animation has played.
+      if (pendingRemoval.length > 0) {
+        const removals = pendingRemoval.splice(0);
+        for (const monster of removals) {
+          if (world.currentPointerTarget === monster) {
+            world.currentPointerTarget = null;
+          }
+
+          for (const player of players) {
+            if (player.playerCombat?.target === monster) {
+              player.playerCombat.target = null;
+              player.playerCombat.attacking = false;
+              player.playerCombat.damageApplied = false;
+            }
+          }
+
+          world.remove(monster);
+        }
       }
     },
   };

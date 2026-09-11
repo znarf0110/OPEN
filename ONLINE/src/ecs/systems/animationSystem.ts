@@ -24,7 +24,8 @@ export const AnimationSystem: ISystemFactory = world => {
     'modelObject',
     'monsterAnimation',
     'movement',
-    'monsterAI'
+    'monsterAI',
+    'monsterHealth'
   );
 
   function calculateAnimation(
@@ -142,9 +143,9 @@ export const AnimationSystem: ISystemFactory = world => {
         const action = playerAnimation.action;
         const isAttack = isPlayerAttackAction(action);
 
-        // MU attack animations are one-shot and should play at their
-        // authored timing. Movement is intentionally slower.
-        playerObject.AnimationSpeed = isAttack ? 14 : 6;
+        // Slow the normal weapon swing slightly so it does not look
+        // like a speedhack. Movement speed is unchanged.
+        playerObject.AnimationSpeed = isAttack ? 8 : 6;
 
         const previous = lastPlayerActions.get(playerObject);
 
@@ -162,19 +163,37 @@ export const AnimationSystem: ISystemFactory = world => {
       // ----------------------------------------------------------
       // MONSTER MODEL ANIMATION
       // ----------------------------------------------------------
-      for (const {
-        monsterAnimation,
-        movement,
-        modelObject,
-        monsterAI,
-      } of monsterAnimatableQuery) {
+      for (const entity of monsterAnimatableQuery) {
+        const {
+          monsterAnimation,
+          movement,
+          modelObject,
+          monsterAI,
+        } = entity;
         if (!modelObject.Ready) continue;
+
+        // HP <= 0 always wins over the normal AI animation state.
+        // This prevents MonsterAISystem from immediately replacing Die
+        // with Stop1 on the next frame.
+        if (entity.monsterHealth?.current !== undefined && entity.monsterHealth.current <= 0) {
+          monsterAI.state = 'dead';
+          monsterAnimation.action = MonsterActionType.Die;
+        }
 
         const isMoving =
           movement.velocity.x !== 0 ||
           movement.velocity.y !== 0;
 
-        if (
+        // HP=0 has absolute priority over the AI's normal idle/wander
+        // animation. MonsterAISystem can briefly set the state back to
+        // idle, so the animation system must also enforce the death pose.
+        if (monsterHealth.current <= 0) {
+          monsterAI.state = 'dead';
+          monsterAnimation.action = MonsterActionType.Die;
+          movement.velocity.x = 0;
+          movement.velocity.y = 0;
+          movement.running = false;
+        } else if (
           monsterAI.state !== 'attack' &&
           monsterAI.state !== 'dead' &&
           isMoving

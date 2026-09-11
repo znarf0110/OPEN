@@ -1,10 +1,13 @@
 import type { ISystemFactory } from '../world';
 
+// Larger ranges make the larger test population easier to see in Lorencia.
+// ModelLoaderSystem still unloads hidden models, so this is intentionally
+// not an unlimited range.
+const VISIBLE_RANGE = 40;
+const NEARBY_RANGE = 52;
+
 export const CalculateVisibilitySystem: ISystemFactory = world => {
   const query = world.with('transform', 'visibility');
-
-  const visibleRange = 16;
-  const nearbyRange = 24;
 
   return {
     update: dt => {
@@ -21,9 +24,7 @@ export const CalculateVisibilitySystem: ISystemFactory = world => {
 
         if (visibility.lastChecked > 0) continue;
 
-        // A lured monster must remain rendered while it is chasing
-        // the player. Otherwise the normal 24-unit visibility system
-        // would dispose its model during an unlimited-distance lure.
+        // Lured monsters must stay rendered while chasing the player.
         if (
           entity.monsterAI?.lured &&
           entity.worldIndex === world.mapIndex
@@ -33,23 +34,19 @@ export const CalculateVisibilitySystem: ISystemFactory = world => {
           continue;
         }
 
-        const distance = Math.sqrt(
-          Math.pow(
-            entity.transform.pos.x -
-              playerEntity.transform.pos.x,
-            2
-          ) +
-            Math.pow(
-              entity.transform.pos.z -
-                playerEntity.transform.pos.z,
-              2
-            )
-        );
+        const dx =
+          entity.transform.pos.x -
+          playerEntity.transform.pos.x;
+        const dz =
+          entity.transform.pos.z -
+          playerEntity.transform.pos.z;
 
-        if (distance <= visibleRange) {
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance <= VISIBLE_RANGE) {
           visibility.state = 'visible';
           visibility.lastChecked = 0.2;
-        } else if (distance <= nearbyRange) {
+        } else if (distance <= NEARBY_RANGE) {
           visibility.state = 'nearby';
           visibility.lastChecked = 0.3;
         } else {

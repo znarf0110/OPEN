@@ -4,6 +4,7 @@ import {
   PlayerAction,
 } from '../../common/objects/enum';
 import type { PlayerObject } from '../../common/playerObject';
+import { queueMonsterRespawn } from './monsterSpawnSystem';
 
 const PLAYER_DAMAGE = 10;
 const MONSTER_DAMAGE = 5;
@@ -315,6 +316,13 @@ export const MonsterCombatSystem: ISystemFactory = world => {
                 target.monsterAI;
 
               if (ai) {
+                // Preserve the monster's exact spawn point for its respawn.
+                queueMonsterRespawn(
+                  target.transform.pos.x,
+                  target.transform.pos.z,
+                  now + 8
+                );
+
                 ai.target = null;
                 ai.lured = false;
                 ai.state = 'dead';

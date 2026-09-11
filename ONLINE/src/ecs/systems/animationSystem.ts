@@ -1,8 +1,11 @@
-import { PlayerAction, MonsterActionType } from '../../common/objects/enum';
 import type { IVector2Like } from '../../libs/babylon/exports';
+import {
+  MonsterActionType,
+  PlayerAction,
+} from '../../common/objects/enum';
+import type { MUAttributeSystem } from '../../libs/attributeSystem';
 import type { ISystemFactory } from '../world';
-import { MUAttributeSystem } from '../../libs/attributeSystem';
-import { PlayerObject } from '../../common/playerObject';
+import type { PlayerObject } from '../../common/playerObject';
 
 export const AnimationSystem: ISystemFactory = world => {
   const playersQuery = world.with(
@@ -12,8 +15,10 @@ export const AnimationSystem: ISystemFactory = world => {
     'movement'
   );
 
-  const playerAnimatableQuery =
-    world.with('modelObject', 'playerAnimation');
+  const playerAnimatableQuery = world.with(
+    'modelObject',
+    'playerAnimation'
+  );
 
   const monsterAnimatableQuery = world.with(
     'modelObject',
@@ -27,24 +32,18 @@ export const AnimationSystem: ISystemFactory = world => {
     velocity: IVector2Like,
     running: boolean
   ) {
-    const inSafeZone =
-      attributeSystem.isAboveZero('inSafeZone');
-    const isFemale =
-      attributeSystem.isAboveZero('isFemale');
-    const isFlying =
-      attributeSystem.isAboveZero('isFlying');
-    const isSwimming =
-      attributeSystem.isAboveZero('isSwimming');
+    const inSafeZone = attributeSystem.isAboveZero('inSafeZone');
+    const isFemale = attributeSystem.isAboveZero('isFemale');
+    const isFlying = attributeSystem.isAboveZero('isFlying');
+    const isSwimming = attributeSystem.isAboveZero('isSwimming');
     const isSpearEquipped =
       attributeSystem.isAboveZero('isSpearEquipped');
 
-    const isMoving =
-      velocity.x !== 0 || velocity.y !== 0;
+    const isMoving = velocity.x !== 0 || velocity.y !== 0;
 
     if (!isMoving) {
       if (isFlying) return PlayerAction.PLAYER_STOP_FLY;
-      if (isSpearEquipped)
-        return PlayerAction.PLAYER_STOP_SPEAR;
+      if (isSpearEquipped) return PlayerAction.PLAYER_STOP_SPEAR;
 
       if (isSwimming) {
         return isFemale
@@ -90,14 +89,24 @@ export const AnimationSystem: ISystemFactory = world => {
       : PlayerAction.PLAYER_WALK_MALE;
   }
 
+  function isPlayerAttackAction(action: PlayerAction) {
+    return (
+      action === PlayerAction.PLAYER_ATTACK_FIST ||
+      action === PlayerAction.PLAYER_ATTACK_SWORD_RIGHT1 ||
+      action === PlayerAction.PLAYER_ATTACK_SWORD_RIGHT2 ||
+      action === PlayerAction.PLAYER_ATTACK_SWORD_LEFT1 ||
+      action === PlayerAction.PLAYER_ATTACK_SWORD_LEFT2
+    );
+  }
+
   const lastPlayerActions = new WeakMap<object, PlayerAction>();
   const lastMonsterActions = new WeakMap<object, MonsterActionType>();
 
   return {
     update: () => {
-      const now =
-        world.gameTime.TotalGameTime.TotalSeconds;
-
+      // ----------------------------------------------------------
+      // PLAYER LOGICAL ANIMATION
+      // ----------------------------------------------------------
       for (const entity of playersQuery) {
         const {
           playerAnimation,
@@ -105,91 +114,54 @@ export const AnimationSystem: ISystemFactory = world => {
           attributeSystem,
         } = entity;
 
-        const combat = entity.playerCombat;
+        // Combat owns the attack animation only while an attack is
+        // actually running. Once the swing is finished, immediately
+        // return control to movement animation. This prevents the
+        // character from staying in the last attack pose (statue)
+        // when the player starts running again.
+        const combatIsAttacking =
+          entity.playerCombat?.attacking === true;
 
-        const isMoving =
-          movement.velocity.x !== 0 ||
-          movement.velocity.y !== 0;
-
-        // Movement always cancels the current attack.
-        if (combat?.attacking && isMoving) {
-          combat.attacking = false;
-          combat.attackUntil = 0;
-          combat.damageApplied = false;
-        }
-
-        if (
-          combat?.attacking &&
-          now < combat.attackUntil
-        ) {
-          playerAnimation.action =
-            PlayerAction.PLAYER_ATTACK_FIST;
-          continue;
-        }
-
-        if (combat?.attacking) {
-          combat.attacking = false;
-          combat.damageApplied = false;
-        }
-
-        playerAnimation.action =
-          calculateAnimation(
+        if (!combatIsAttacking) {
+          playerAnimation.action = calculateAnimation(
             attributeSystem,
             movement.velocity,
             movement.running === true
           );
+        }
       }
 
-      for (const {
-        playerAnimation,
-        modelObject,
-      } of playerAnimatableQuery) {
-        const playerObject =
-          modelObject as PlayerObject;
+      // ----------------------------------------------------------
+      // PLAYER MODEL ANIMATION
+      // ----------------------------------------------------------
+      for (const { playerAnimation, modelObject } of playerAnimatableQuery) {
+        const playerObject = modelObject as PlayerObject;
 
         if (!playerObject.Ready) continue;
 
-        const isAttack =
-          playerAnimation.action ===
-          PlayerAction.PLAYER_ATTACK_FIST;
+        const action = playerAnimation.action;
+        const isAttack = isPlayerAttackAction(action);
 
-        if (playerAnimation.action === PlayerAction.PLAYER_ATTACK_FIST) {
-          // Attack animations must run at the authored MU speed.
-          playerObject.AnimationSpeed = 14;
-        } else if (
-          playerAnimation.action >=
-            PlayerAction.PLAYER_WALK_MALE &&
-          playerAnimation.action <=
-            PlayerAction.PLAYER_RUN_SWIM
-        ) {
-          playerObject.AnimationSpeed = 6;
-        }
+        // MU attack animations are one-shot and should play at their
+        // authored timing. Movement is intentionally slower.
+        playerObject.AnimationSpeed = isAttack ? 14 : 6;
 
-        const previousPlayerAction =
-          lastPlayerActions.get(playerObject);
+        const previous = lastPlayerActions.get(playerObject);
 
-        if (
-          previousPlayerAction !==
-          playerAnimation.action
-        ) {
-          playerObject.playAction(
-            playerAnimation.action,
-            !isAttack
-          );
-          lastPlayerActions.set(
-            playerObject,
-            playerAnimation.action
-          );
+        if (previous !== action) {
+          playerObject.playAction(action, !isAttack);
+          lastPlayerActions.set(playerObject, action);
         }
 
         if (playerObject.Wings) {
           playerObject.Wings.AnimationSpeed =
-            playerObject.CurrentAction < 15
-              ? 4
-              : 16;
+            playerObject.CurrentAction < 15 ? 4 : 16;
         }
       }
 
+      // ----------------------------------------------------------
+      // MONSTER MODEL ANIMATION
+      // ----------------------------------------------------------
       for (const {
         monsterAnimation,
         movement,
@@ -204,36 +176,33 @@ export const AnimationSystem: ISystemFactory = world => {
 
         if (
           monsterAI.state !== 'attack' &&
+          monsterAI.state !== 'dead' &&
           isMoving
         ) {
-          monsterAnimation.action =
-            MonsterActionType.Walk;
+          monsterAnimation.action = MonsterActionType.Walk;
         } else if (
-          monsterAI.state !== 'attack'
+          monsterAI.state !== 'attack' &&
+          monsterAI.state !== 'dead'
         ) {
-          monsterAnimation.action =
-            MonsterActionType.Stop1;
+          monsterAnimation.action = MonsterActionType.Stop1;
         }
 
         const isAttack =
-          monsterAnimation.action ===
-          MonsterActionType.Attack1;
+          monsterAnimation.action === MonsterActionType.Attack1;
+
+        const isDeath =
+          monsterAnimation.action === MonsterActionType.Die;
 
         if (isAttack) {
-          // Play the authored monster attack at normal speed.
           modelObject.AnimationSpeed = 14;
         }
 
-        const previousMonsterAction =
-          lastMonsterActions.get(modelObject);
+        const previous = lastMonsterActions.get(modelObject);
 
-        if (
-          previousMonsterAction !==
-          monsterAnimation.action
-        ) {
+        if (previous !== monsterAnimation.action) {
           modelObject.playAction(
             monsterAnimation.action,
-            !isAttack
+            !isAttack && !isDeath
           );
           lastMonsterActions.set(
             modelObject,

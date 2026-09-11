@@ -6,11 +6,7 @@ const MOVE_DELAY = 0.25;
 export const PlayerControllerSystem: ISystemFactory = world => {
   const query = world.with('playerMoveTo', 'transform', 'pathfinding');
 
-  const box = CreateBox(
-    'playerControllerBox',
-    { width: 0.75, depth: 0.75, height: 0.02 },
-    world.scene
-  );
+  const box = CreateBox('playerControllerBox', { width: 0.75, depth: 0.75, height: 0.02 }, world.scene);
   box.setParent(world.mapParent);
   box.isPickable = false;
   box.alwaysSelectAsActiveMesh = true;
@@ -24,6 +20,17 @@ export const PlayerControllerSystem: ISystemFactory = world => {
   function clearPlayerCombat() {
     const player = world.playerEntity;
     if (!player?.playerCombat) return;
+
+    const target = player.playerCombat.target;
+    if (target?.monsterAI?.target === player) {
+      target.monsterAI.target = null;
+      target.monsterAI.lured = false;
+      target.monsterAI.state = 'return';
+      target.monsterAI.nextDecisionAt = world.gameTime.TotalGameTime.TotalSeconds;
+      target.monsterAI.attackUntil = 0;
+      target.monsterAI.damageAt = 0;
+      target.monsterAI.damageApplied = false;
+    }
 
     player.playerCombat.attacking = false;
     player.playerCombat.target = null;
@@ -43,48 +50,21 @@ export const PlayerControllerSystem: ISystemFactory = world => {
       const player = world.playerEntity;
       const target = world.currentPointerTarget;
 
-      // ------------------------------------------------------------
-      // MONSTER CLICK = SELECT + ATTACK
-      // ------------------------------------------------------------
-      if (
-        player &&
-        target &&
-        target !== player &&
-        target.monsterAI &&
-        target.monsterHealth &&
-        target.transform &&
-        target.monsterHealth.current > 0
-      ) {
-        player.playerCombat ??= {
-          attacking: false,
-          target: null,
-          attackUntil: 0,
-          damageAt: 0,
-          damageApplied: false,
-          attackRange: 2.2,
-        };
-
+      if (player && target && target !== player && target.monsterAI && target.monsterHealth && target.transform && target.monsterHealth.current > 0) {
+        player.playerCombat ??= { attacking: false, target: null, attackUntil: 0, damageAt: 0, damageApplied: false, attackRange: 2.2 };
         player.playerCombat.target = target;
         player.playerCombat.attacking = false;
         player.playerCombat.attackUntil = 0;
         player.playerCombat.damageAt = 0;
         player.playerCombat.damageApplied = false;
-
-        // Intentional player attack permanently lures this monster.
         target.monsterAI.target = player;
         target.monsterAI.lured = true;
         target.monsterAI.state = 'lured';
-        target.monsterAI.chaseStartedAt =
-          world.gameTime.TotalGameTime.TotalSeconds;
-
-        // Do not start ground movement while a monster is selected.
+        target.monsterAI.chaseStartedAt = world.gameTime.TotalGameTime.TotalSeconds;
         world.pointerPressed = false;
         return;
       }
 
-      // ------------------------------------------------------------
-      // GROUND CLICK = CANCEL ATTACK AND MOVE
-      // ------------------------------------------------------------
       clearPlayerCombat();
       world.pointerPressed = true;
     }
@@ -94,32 +74,21 @@ export const PlayerControllerSystem: ISystemFactory = world => {
     }
   });
 
-  window.addEventListener('lostpointercapture', () => {
-    world.pointerPressed = false;
-  });
+  window.addEventListener('lostpointercapture', () => { world.pointerPressed = false; });
 
   function tryMove() {
     const player = world.playerEntity;
     if (!player) return;
 
-    const pick = world.scene.pick(
-      lastClientX,
-      lastClientY,
-      m => m === world.terrain?.mesh,
-      true
-    );
-
+    const pick = world.scene.pick(lastClientX, lastClientY, m => m === world.terrain?.mesh, true);
     if (!pick?.pickedPoint) return;
 
     const point = pick.pickedPoint;
     const x = ~~point.x;
     const z = ~~point.z;
-
     if (!world.isWalkable(x, z)) return;
 
-    // Ground movement cancels the selected monster target.
     clearPlayerCombat();
-
     player.playerMoveTo.point.x = point.x;
     player.playerMoveTo.point.y = point.z;
     player.playerMoveTo.handled = false;
@@ -129,7 +98,6 @@ export const PlayerControllerSystem: ISystemFactory = world => {
   return {
     update: dt => {
       delay -= dt;
-
       if (world.pointerPressed && delay <= 0) {
         delay = MOVE_DELAY;
         tryMove();
@@ -137,7 +105,6 @@ export const PlayerControllerSystem: ISystemFactory = world => {
 
       for (const { playerMoveTo, transform, pathfinding, localPlayer } of query) {
         if (playerMoveTo.handled) continue;
-
         playerMoveTo.handled = true;
         pathfinding.calculated = false;
         pathfinding.from.x = transform.pos.x;
@@ -148,9 +115,7 @@ export const PlayerControllerSystem: ISystemFactory = world => {
         if (localPlayer) {
           box.position.x = ~~playerMoveTo.point.x + 0.5;
           box.position.z = ~~playerMoveTo.point.y + 0.5;
-          box.position.y =
-            world.getTerrainHeight(playerMoveTo.point.x, playerMoveTo.point.y) +
-            0.02;
+          box.position.y = world.getTerrainHeight(playerMoveTo.point.x, playerMoveTo.point.y) + 0.02;
         }
       }
     },

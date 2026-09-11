@@ -169,41 +169,36 @@ export const AnimationSystem: ISystemFactory = world => {
           movement,
           modelObject,
           monsterAI,
+          monsterHealth,
         } = entity;
+
         if (!modelObject.Ready) continue;
 
-        // HP <= 0 always wins over the normal AI animation state.
-        // This prevents MonsterAISystem from immediately replacing Die
-        // with Stop1 on the next frame.
-        if (entity.monsterHealth?.current !== undefined && entity.monsterHealth.current <= 0) {
-          monsterAI.state = 'dead';
-          monsterAnimation.action = MonsterActionType.Die;
-        }
-
-        const isMoving =
-          movement.velocity.x !== 0 ||
-          movement.velocity.y !== 0;
-
-        // HP=0 has absolute priority over the AI's normal idle/wander
-        // animation. MonsterAISystem can briefly set the state back to
-        // idle, so the animation system must also enforce the death pose.
+        // Death has absolute priority. Never let the normal AI
+        // animation replace the Die animation while HP is 0.
         if (monsterHealth.current <= 0) {
           monsterAI.state = 'dead';
           monsterAnimation.action = MonsterActionType.Die;
           movement.velocity.x = 0;
           movement.velocity.y = 0;
           movement.running = false;
-        } else if (
-          monsterAI.state !== 'attack' &&
-          monsterAI.state !== 'dead' &&
-          isMoving
-        ) {
-          monsterAnimation.action = MonsterActionType.Walk;
-        } else if (
-          monsterAI.state !== 'attack' &&
-          monsterAI.state !== 'dead'
-        ) {
-          monsterAnimation.action = MonsterActionType.Stop1;
+        } else {
+          const isMoving =
+            movement.velocity.x !== 0 ||
+            movement.velocity.y !== 0;
+
+          if (
+            monsterAI.state !== 'attack' &&
+            monsterAI.state !== 'dead' &&
+            isMoving
+          ) {
+            monsterAnimation.action = MonsterActionType.Walk;
+          } else if (
+            monsterAI.state !== 'attack' &&
+            monsterAI.state !== 'dead'
+          ) {
+            monsterAnimation.action = MonsterActionType.Stop1;
+          }
         }
 
         const isAttack =

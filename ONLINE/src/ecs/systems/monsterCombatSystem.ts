@@ -404,7 +404,9 @@ export const MonsterCombatSystem: ISystemFactory = world => {
               monster.modelObject.OutOfView = true;
 
               if (monster.modelObject.gltf?.mesh) {
-                monster.modelObject.gltf.mesh.dispose(false, true);
+                // Dispose the monster hierarchy but KEEP shared materials/textures.
+                // The terrain/foliage can share Babylon materials/textures.
+                monster.modelObject.gltf.mesh.dispose(false, false);
               }
 
               monster.modelObject.gltf?.animationGroups.forEach(group => {

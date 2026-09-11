@@ -19,10 +19,10 @@ const PLAYER_DAMAGE_RATIO = 0.48;
 const MONSTER_DAMAGE_RATIO = 0.58;
 
 const PLAYER_ATTACK_EFFECT =
-  'Effect/shockwave_spin01.glb';
+  'player-hit';
 
 const MONSTER_ATTACK_EFFECT =
-  'Effect/FlameStrike.glb';
+  'dragon-fire';
 
 function stop(entity: Entity) {
   if (!entity.movement) return;

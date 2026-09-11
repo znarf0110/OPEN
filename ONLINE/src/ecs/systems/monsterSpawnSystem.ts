@@ -1,148 +1,96 @@
 import { BudgeDragon } from '../../common/monsters/budgeDragon';
 import { MonsterActionType } from '../../common/objects/enum';
+import { ENUM_WORLD } from '../../common';
+import { TWFlags } from '../../common/terrain/consts';
+import { isFlagInBinaryMask } from '../../common/utils';
 import { createAttributeSystem } from '../../libs/attributeSystem';
 import { Vector3 } from '../../libs/babylon/exports';
-import { TERRAIN_SIZE } from '../../common/terrain/consts';
-import type { ISystemFactory } from '../world';
+import type { Entity, ISystemFactory } from '../world';
 
-const MONSTER_COUNT = 30;
-const MIN_SPAWN_DISTANCE_FROM_TOWN = 35;
-const MIN_DISTANCE_BETWEEN_MONSTERS = 5;
-const MAX_SPAWN_ATTEMPTS = 40;
+const MONSTER_COUNT = 24;
+const TOWN_X = 135;
+const TOWN_Z = 131;
+const TOWN_RADIUS = 45;
 
-function distanceSquared(ax: number, az: number, bx: number, bz: number) {
-  const dx = ax - bx;
-  const dz = az - bz;
+function d2(a: { x: number; z: number }, b: { x: number; z: number }) {
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
   return dx * dx + dz * dz;
 }
 
+function isField(world: Parameters<ISystemFactory>[0], x: number, z: number) {
+  if (!world.isWalkable(~~x, ~~z)) return false;
+
+  const inFieldBand =
+    (x >= 10 && x <= 105 && z >= 35 && z <= 225) ||
+    (x >= 165 && x <= 246 && z >= 35 && z <= 225) ||
+    (x >= 70 && x <= 195 && z >= 10 && z <= 80) ||
+    (x >= 70 && x <= 195 && z >= 180 && z <= 246);
+
+  if (!inFieldBand) return false;
+  if (d2({ x, z }, { x: TOWN_X, z: TOWN_Z }) < TOWN_RADIUS * TOWN_RADIUS) return false;
+
+  const flag = world.getTerrainFlag(~~x, ~~z);
+  return !isFlagInBinaryMask(flag, TWFlags.SafeZone) &&
+    !isFlagInBinaryMask(flag, TWFlags.NoMove) &&
+    !isFlagInBinaryMask(flag, TWFlags.NoGround);
+}
+
 export const MonsterSpawnSystem: ISystemFactory = world => {
-  let spawned = false;
+  let done = false;
 
   return {
     update: () => {
-      if (spawned || !world.terrain) return;
+      if (done) return;
+      if (world.mapIndex !== ENUM_WORLD.WD_0LORENCIA) return;
+      if (!world.terrain || !world.playerEntity?.transform) return;
 
-      // Wait for the local player so the field spawn can be placed relative to
-      // the loaded map/player instead of spawning during the loading scene.
-      const player = world.playerEntity;
-      if (!player?.transform) return;
+      // Spawn incrementally. This avoids freezing the browser with a 65k-cell scan.
+      const candidates: { x: number; z: number }[] = [];
+      for (let i = 0; i < 1200; i++) {
+        const x = 10 + Math.random() * 236;
+        const z = 10 + Math.random() * 236;
+        if (isField(world, x, z)) candidates.push({ x, z });
+      }
 
-      const monsters: typeof player[] = [];
+      const created: Entity[] = [];
+      for (const pos of candidates) {
+        if (created.length >= MONSTER_COUNT) break;
+        if (created.some(m => m.transform && d2(pos, { x: m.transform.pos.x, z: m.transform.pos.z }) < 6 * 6)) continue;
 
-      for (let i = 0; i < MONSTER_COUNT; i++) {
-        let x = 0;
-        let z = 0;
-        let found = false;
-
-        for (let attempt = 0; attempt < MAX_SPAWN_ATTEMPTS; attempt++) {
-          // Field area: keep mobs away from the center/town area.
-          x = 10 + Math.random() * (TERRAIN_SIZE - 20);
-          z = 10 + Math.random() * (TERRAIN_SIZE - 20);
-
-          if (
-            distanceSquared(
-              x,
-              z,
-              player.transform.pos.x,
-              player.transform.pos.z
-            ) < MIN_SPAWN_DISTANCE_FROM_TOWN ** 2
-          ) {
-            continue;
-          }
-
-          if (!world.isWalkable(~~x, ~~z)) continue;
-
-          let tooClose = false;
-          for (const other of monsters) {
-            if (!other.transform) continue;
-
-            if (
-              distanceSquared(
-                x,
-                z,
-                other.transform.pos.x,
-                other.transform.pos.z
-              ) < MIN_DISTANCE_BETWEEN_MONSTERS ** 2
-            ) {
-              tooClose = true;
-              break;
-            }
-          }
-
-          if (tooClose) continue;
-
-          found = true;
-          break;
-        }
-
-        if (!found) continue;
-
-        const modelFactory = BudgeDragon;
-
+        const factory = BudgeDragon;
         const monster = world.add({
-          worldIndex: world.mapIndex,
-
+          worldIndex: ENUM_WORLD.WD_0LORENCIA,
           transform: {
-            pos: new Vector3(
-              x,
-              world.getTerrainHeight(x, z),
-              z
-            ),
+            pos: new Vector3(pos.x, world.getTerrainHeight(pos.x, pos.z), pos.z),
             rot: new Vector3(0, 0, 0),
-            scale:
-              modelFactory.OverrideScale >= 0
-                ? modelFactory.OverrideScale
-                : 1,
+            scale: factory.OverrideScale >= 0 ? factory.OverrideScale : 1,
             posOffset: new Vector3(0.5, 0, 0.5),
           },
-
-          modelFactory,
-
-          pathfinding: {
-            from: { x, y: z },
-            to: { x, y: z },
-            path: [],
-            calculated: true,
-          },
-
-          movement: {
-            velocity: { x: 0, y: 0 },
-            running: false,
-          },
-
-          monsterAnimation: {
-            action: MonsterActionType.Stop1,
-          },
-
+          modelFactory: factory,
+          movement: { velocity: { x: 0, y: 0 }, running: false },
+          monsterAnimation: { action: MonsterActionType.Stop1 },
           monsterAI: {
             state: 'idle',
             target: null,
-            spawnPosition: { x, y: z },
-            aggroRadius: 8,
-            attackRadius: 1.8,
-            wanderRadius: 10,
-            leashRadius: 60,
+            spawnPosition: { x: pos.x, y: pos.z },
+            aggroRadius: 10,
+            attackRadius: 2.2,
+            wanderRadius: 18,
+            leashRadius: 0,
             lured: false,
             chaseStartedAt: 0,
-            nextDecisionAt: 0,
+            nextDecisionAt: world.gameTime.TotalGameTime.TotalSeconds + Math.random() * 4,
+            nextPathAt: 0,
+            lastTargetX: pos.x,
+            lastTargetZ: pos.z,
             nextAttackAt: 0,
             attackUntil: 0,
-            damageAt: 0,
             damageApplied: false,
-            deathUntil: 0,
           },
-
-          visibility: {
-            lastChecked: 0,
-            state: 'visible',
-          },
-
-          monsterHealth: {
-            current: 100,
-            max: 100,
-          },
-
+          monsterHealth: { current: 100, max: 100 },
+          screenPosition: { x: 0, y: 0, worldOffsetZ: 2.8 },
+          visibility: { state: 'hidden', lastChecked: 0 },
           attributeSystem: createAttributeSystem(),
           objectNameInWorld: 'Budge Dragon',
           interactable: true,
@@ -150,15 +98,11 @@ export const MonsterSpawnSystem: ISystemFactory = world => {
 
         monster.attributeSystem?.setValue('isFemale', 0);
         monster.attributeSystem?.setValue('isFlying', 0);
-
-        monsters.push(monster);
+        created.push(monster);
       }
 
-      spawned = true;
-
-      console.log(
-        `[MONSTER SPAWN] Spawned ${monsters.length} Budge Dragons in the field`
-      );
+      done = created.length > 0;
+      console.log(`[MONSTER SPAWN FIX4] spawned ${created.length} field monsters`);
     },
   };
 };

@@ -1,121 +1,105 @@
 import { MonsterActionType } from '../../common/objects/enum';
+import { TWFlags } from '../../common/terrain/consts';
+import { isFlagInBinaryMask } from '../../common/utils';
+import { ENUM_WORLD } from '../../common';
 import type { Entity, ISystemFactory } from '../world';
 
-const WANDER_INTERVAL_MIN = 2;
-const WANDER_INTERVAL_MAX = 5;
-const ATTACK_INTERVAL = 1;
-const LURED_TIMEOUT = 120;
+const AGGRO_RADIUS = 10;
+const ATTACK_RADIUS = 2.2;
+const MONSTER_SPEED = 2.2;
+const WANDER_SPEED = 1.4;
+const WANDER_MIN = 2;
+const WANDER_MAX = 5;
+const LURE_TIMEOUT = 120;
+const ATTACK_DURATION = 0.75;
+const ATTACK_COOLDOWN = 1.4;
 
-function distanceSquared(
-  a: { x: number; z: number },
-  b: { x: number; z: number }
-) {
+const TOWN = { x: 135, z: 131, radius: 45 };
+
+function d2(a: { x: number; z: number }, b: { x: number; z: number }) {
   const dx = a.x - b.x;
   const dz = a.z - b.z;
   return dx * dx + dz * dz;
 }
 
-function randomBetween(min: number, max: number) {
-  return min + Math.random() * (max - min);
-}
+function isField(world: Parameters<ISystemFactory>[0], x: number, z: number) {
+  if (x < 4 || z < 4 || x > 251 || z > 251) return false;
+  if (!world.isWalkable(~~x, ~~z)) return false;
 
-function setDestination(
-  monster: Entity,
-  x: number,
-  z: number
-) {
-  if (!monster.transform || !monster.pathfinding) return;
+  // Hard field bands. This prevents mobs from appearing in the Lorencia town
+  // even if a terrain flag happens to be inconsistent around the town edge.
+  const inFieldBand =
+    (x >= 10 && x <= 105 && z >= 35 && z <= 225) ||
+    (x >= 165 && x <= 246 && z >= 35 && z <= 225) ||
+    (x >= 70 && x <= 195 && z >= 10 && z <= 80) ||
+    (x >= 70 && x <= 195 && z >= 180 && z <= 246);
 
-  monster.pathfinding.from.x = monster.transform.pos.x;
-  monster.pathfinding.from.y = monster.transform.pos.z;
-  monster.pathfinding.to.x = ~~x;
-  monster.pathfinding.to.y = ~~z;
-  monster.pathfinding.path = null;
-  monster.pathfinding.calculated = false;
+  if (!inFieldBand) return false;
+  if (d2({ x, z }, TOWN) < TOWN.radius * TOWN.radius) return false;
+
+  const flag = world.getTerrainFlag(~~x, ~~z);
+  if (isFlagInBinaryMask(flag, TWFlags.SafeZone)) return false;
+  if (isFlagInBinaryMask(flag, TWFlags.NoMove)) return false;
+  if (isFlagInBinaryMask(flag, TWFlags.NoGround)) return false;
+
+  return true;
 }
 
 function stop(monster: Entity) {
-  if (!monster.movement || !monster.pathfinding) return;
-
+  if (!monster.movement) return;
   monster.movement.velocity.x = 0;
   monster.movement.velocity.y = 0;
-  monster.pathfinding.path = [];
-  monster.pathfinding.calculated = true;
+  monster.movement.running = false;
 }
 
-function chooseWanderDestination(
-  world: Parameters<ISystemFactory>[0],
-  monster: Entity
-) {
-  const ai = monster.monsterAI;
-  const transform = monster.transform;
-
-  if (!ai || !transform) return;
-
-  const angle = Math.random() * Math.PI * 2;
-  const radius = Math.random() * ai.wanderRadius;
-
-  const x = ai.spawnPosition.x + Math.cos(angle) * radius;
-  const z = ai.spawnPosition.y + Math.sin(angle) * radius;
-
-  if (!world.isWalkable(~~x, ~~z)) return;
-
-  setDestination(monster, x, z);
-  ai.nextDecisionAt =
-    world.gameTime.TotalGameTime.TotalSeconds +
-    randomBetween(WANDER_INTERVAL_MIN, WANDER_INTERVAL_MAX);
-}
-
-function startChase(
-  world: Parameters<ISystemFactory>[0],
-  monster: Entity,
-  target: Entity,
-  lured: boolean
-) {
-  const ai = monster.monsterAI;
-  if (!ai) return;
-
-  ai.target = target;
-  ai.lured = lured;
-  ai.state = lured ? 'lured' : 'chase';
-  ai.chaseStartedAt =
-    world.gameTime.TotalGameTime.TotalSeconds;
-
-  if (target.transform) {
-    setDestination(
-      monster,
-      target.transform.pos.x,
-      target.transform.pos.z
-    );
+function move(monster: Entity, dx: number, dz: number, speed: number) {
+  if (!monster.movement) return;
+  const len = Math.sqrt(dx * dx + dz * dz);
+  if (len < 0.001) {
+    stop(monster);
+    return;
   }
+  monster.movement.velocity.x = (dx / len) * speed;
+  monster.movement.velocity.y = (dz / len) * speed;
+  monster.movement.running = true;
+  monster.transform!.rot.y = Math.atan2(monster.movement.velocity.y, monster.movement.velocity.x) + Math.PI / 2;
 }
 
-function returnToSpawn(
-  world: Parameters<ISystemFactory>[0],
-  monster: Entity
-) {
-  const ai = monster.monsterAI;
-  if (!ai) return;
+function tryMove(world: Parameters<ISystemFactory>[0], monster: Entity, dx: number, dz: number, speed: number) {
+  const p = monster.transform!.pos;
+  const len = Math.sqrt(dx * dx + dz * dz) || 1;
+  const nx = p.x + (dx / len) * speed * 0.35;
+  const nz = p.z + (dz / len) * speed * 0.35;
+  if (isField(world, nx, nz)) {
+    move(monster, dx, dz, speed);
+    return true;
+  }
+  return false;
+}
 
-  ai.target = null;
-  ai.lured = false;
-  ai.state = 'return';
+function wander(world: Parameters<ISystemFactory>[0], monster: Entity, now: number) {
+  const ai = monster.monsterAI!;
+  const p = monster.transform!.pos;
 
-  setDestination(
-    monster,
-    ai.spawnPosition.x,
-    ai.spawnPosition.y
-  );
+  for (let i = 0; i < 20; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 4 + Math.random() * 18;
+    const x = p.x + Math.cos(angle) * radius;
+    const z = p.z + Math.sin(angle) * radius;
+    if (!isField(world, x, z)) continue;
+
+    ai.state = 'wander';
+    ai.nextDecisionAt = now + WANDER_MIN + Math.random() * (WANDER_MAX - WANDER_MIN);
+    ai.lastTargetX = x;
+    ai.lastTargetZ = z;
+    return;
+  }
+
+  ai.nextDecisionAt = now + 1;
 }
 
 export const MonsterAISystem: ISystemFactory = world => {
-  const query = world.with(
-    'monsterAI',
-    'transform',
-    'pathfinding',
-    'movement',
-    'monsterAnimation'
-  );
+  const query = world.with('monsterAI', 'transform', 'movement', 'monsterAnimation');
 
   return {
     update: dt => {
@@ -123,159 +107,124 @@ export const MonsterAISystem: ISystemFactory = world => {
       const now = world.gameTime.TotalGameTime.TotalSeconds;
 
       for (const monster of query) {
+        if (monster.worldIndex !== world.mapIndex) continue;
         const ai = monster.monsterAI;
-        const transform = monster.transform;
+        const p = monster.transform.pos;
+        if (!ai) continue;
 
-        if (!ai || !transform) continue;
-
-        if (ai.state === 'dead') {
+        if (monster.monsterHealth && monster.monsterHealth.current <= 0) {
           stop(monster);
-          monster.monsterAnimation.action = MonsterActionType.Die;
+          ai.state = 'idle';
+          monster.monsterAnimation.action = MonsterActionType.Stop1;
           continue;
         }
 
-        const playerAlive =
-          !!player?.transform &&
-          player.visibility?.state !== 'hidden';
+        const playerValid = !!player?.transform && player.worldIndex === monster.worldIndex;
 
-        // --------------------------------------------------
-        // No valid target
-        // --------------------------------------------------
+        // Acquire normal aggro only while the player is near the monster.
+        if (!ai.target && playerValid && d2(p, player!.transform!.pos) <= AGGRO_RADIUS * AGGRO_RADIUS) {
+          ai.target = player!;
+          ai.lured = false;
+          ai.state = 'aggro';
+          ai.chaseStartedAt = now;
+          ai.nextAttackAt = now;
+        }
+
+        // No target = either return to the original spawn point or roam.
         if (!ai.target) {
-          if (
-            playerAlive &&
-            distanceSquared(
-              transform.pos,
-              player!.transform!.pos
-            ) <= ai.aggroRadius ** 2
-          ) {
-            startChase(world, monster, player!, false);
-            continue;
-          }
-
           if (ai.state === 'return') {
-            if (
-              distanceSquared(
-                transform.pos,
-                {
-                  x: ai.spawnPosition.x,
-                  z: ai.spawnPosition.y,
-                }
-              ) < 1.5 ** 2
-            ) {
-              ai.state = 'idle';
-              ai.nextDecisionAt = now + randomBetween(1, 3);
+            const dx = ai.spawnPosition.x - p.x;
+            const dz = ai.spawnPosition.y - p.z;
+            if (dx * dx + dz * dz <= 2.5 * 2.5) {
               stop(monster);
+              ai.state = 'idle';
+              ai.nextDecisionAt = now + 1 + Math.random() * 2;
+              monster.monsterAnimation.action = MonsterActionType.Stop1;
+            } else if (!tryMove(world, monster, dx, dz, MONSTER_SPEED)) {
+              // If the direct route is blocked, pick a new field direction.
+              ai.state = 'idle';
+              ai.nextDecisionAt = now + 0.5;
+            } else {
+              monster.monsterAnimation.action = MonsterActionType.Walk;
             }
-
             continue;
           }
 
-          if (now >= ai.nextDecisionAt) {
-            ai.state = 'wander';
-            chooseWanderDestination(world, monster);
+          if (ai.state === 'attack' || ai.state === 'chase' || ai.state === 'lured' || ai.state === 'aggro') {
+            ai.state = 'idle';
           }
 
+          if (now >= ai.nextDecisionAt) wander(world, monster, now);
+
+          const dx = ai.lastTargetX - p.x;
+          const dz = ai.lastTargetZ - p.z;
+          if (dx * dx + dz * dz < 2.0) {
+            stop(monster);
+            monster.monsterAnimation.action = MonsterActionType.Stop1;
+          } else if (!tryMove(world, monster, dx, dz, WANDER_SPEED)) {
+            ai.nextDecisionAt = now;
+          } else {
+            monster.monsterAnimation.action = MonsterActionType.Walk;
+          }
           continue;
         }
 
         const target = ai.target;
-
-        // --------------------------------------------------
-        // Target disappeared/dead/invalid
-        // --------------------------------------------------
-        if (
-          !target.transform ||
-          target.visibility?.state === 'hidden'
-        ) {
-          returnToSpawn(world, monster);
+        if (!target.transform || target.worldIndex !== monster.worldIndex) {
+          ai.target = null;
+          ai.lured = false;
+          ai.state = 'return';
+          ai.nextDecisionAt = now;
           continue;
         }
 
-        // --------------------------------------------------
-        // Intentional lure
-        //
-        // IMPORTANT:
-        // Distance does NOT cancel a lure.
-        // --------------------------------------------------
-        if (ai.lured) {
-          if (now - ai.chaseStartedAt > LURED_TIMEOUT) {
-            returnToSpawn(world, monster);
-            continue;
-          }
-        } else {
-          // Normal aggro has a leash based on aggro radius.
-          if (
-            distanceSquared(
-              transform.pos,
-              target.transform.pos
-            ) > ai.aggroRadius ** 2
-          ) {
-            returnToSpawn(world, monster);
-            continue;
-          }
+        // Intentional lure never resets because of distance.
+        if (ai.lured && now - ai.chaseStartedAt > LURE_TIMEOUT) {
+          ai.target = null;
+          ai.lured = false;
+          ai.state = 'return';
+          ai.nextDecisionAt = now;
+          continue;
         }
 
-        const targetDistance = Math.sqrt(
-          distanceSquared(
-            transform.pos,
-            target.transform.pos
-          )
-        );
+        if (!ai.lured && d2(p, target.transform.pos) > AGGRO_RADIUS * AGGRO_RADIUS) {
+          ai.target = null;
+          ai.state = 'return';
+          ai.nextDecisionAt = now;
+          continue;
+        }
 
-        // --------------------------------------------------
-        // Attack range
-        // --------------------------------------------------
-        if (targetDistance <= ai.attackRadius) {
+        const dx = target.transform.pos.x - p.x;
+        const dz = target.transform.pos.z - p.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance <= ATTACK_RADIUS) {
           stop(monster);
           ai.state = 'attack';
+          monster.monsterAnimation.action = MonsterActionType.Attack1;
 
-          // Attack1 finished: clear the active attack so the
-          // monster can start another attack or continue chasing.
-          if (ai.attackUntil > 0 && now >= ai.attackUntil) {
-            ai.attackUntil = 0;
-            ai.damageAt = 0;
+          if (now >= ai.nextAttackAt) {
+            ai.nextAttackAt = now + ATTACK_COOLDOWN;
+            ai.attackUntil = now + ATTACK_DURATION;
             ai.damageApplied = false;
           }
 
-          if (ai.attackUntil <= 0 && now >= ai.nextAttackAt) {
-            monster.monsterAnimation.action =
-              MonsterActionType.Attack1;
-
-            let duration = 0.65;
-
-            if (monster.modelObject) {
-              const measured =
-                monster.modelObject.getActionDuration(
-                  MonsterActionType.Attack1
-                );
-
-              if (measured > 0.05 && measured < 5) {
-                duration = measured;
-              }
-            }
-
-            ai.attackUntil = now + duration;
-            ai.damageAt = now + duration * 0.58;
-            ai.nextAttackAt = now + duration + ATTACK_INTERVAL;
-            ai.damageApplied = false;
+          if (now >= ai.attackUntil) {
+            monster.monsterAnimation.action = MonsterActionType.Stop1;
           }
-
           continue;
         }
 
-        // --------------------------------------------------
-        // Chase
-        // --------------------------------------------------
         ai.state = ai.lured ? 'lured' : 'chase';
-
-        // Recalculate the destination repeatedly so the mob
-        // follows a moving player.
-        setDestination(
-          monster,
-          target.transform.pos.x,
-          target.transform.pos.z
-        );
+        if (!tryMove(world, monster, dx, dz, MONSTER_SPEED)) {
+          // Try a small side step if a straight line is blocked.
+          const sideX = -dz;
+          const sideZ = dx;
+          if (!tryMove(world, monster, sideX, sideZ, MONSTER_SPEED)) {
+            stop(monster);
+          }
+        }
+        monster.monsterAnimation.action = MonsterActionType.Walk;
       }
 
       void dt;

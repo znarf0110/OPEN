@@ -20,49 +20,44 @@ import { BackgroundMusicSystem } from './systems/backgroundMusicSystem';
 import { InteractiveAreaSystem } from './systems/interactiveAreaSystem';
 import { WalkSfxSystem } from './systems/walkSfxSystem';
 import { KeyboardMovementSystem } from './systems/keyboardMovementSystem';
+
 import { MonsterSpawnSystem } from './systems/monsterSpawnSystem';
 import { MonsterAISystem } from './systems/monsterAISystem';
 import { MonsterCombatSystem } from './systems/monsterCombatSystem';
 import { MonsterTargetUISystem } from './systems/monsterTargetUISystem';
-import { MonsterDeathSystem } from './systems/monsterDeathSystem';
 import { SkillEffectSystem } from './systems/skillEffectSystem';
 
 const factories: ISystemFactory[] = [
   ModelLoaderSystem,
-
   PointerInputSystem,
   KeyboardInputSystem,
   InteractiveAreaSystem,
 
   PlayerControllerSystem,
+
+  // Monster spawn -> AI -> player/monster combat -> pathfinding -> movement.
+  MonsterSpawnSystem,
+  MonsterAISystem,
+  MonsterCombatSystem,
+  SkillEffectSystem,
   PathfindingSystem,
 
   CalculateVisibilitySystem,
   CalculateScreenPositionSystem,
+  MonsterTargetUISystem,
 
   NetworkSystem,
-
   MoveAlongPathSystem,
   KeyboardMovementSystem,
-
-  MonsterSpawnSystem,
-  MonsterAISystem,
-  MonsterCombatSystem,
 
   HighlightSystem,
   AnimationSystem,
   AppearanceSystem,
   WalkSfxSystem,
-
-  MonsterTargetUISystem,
-  SkillEffectSystem,
-  MonsterDeathSystem,
-
   CameraFollowSystem,
   OutOfScopeSystem,
   BackgroundMusicSystem,
   DrawDebugSystem,
-
   RenderSystem,
 ];
 

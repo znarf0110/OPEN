@@ -7,8 +7,8 @@ import type { Entity, ISystemFactory } from '../world';
 const EPSILON = 0.0001;
 
 function stop(entity: Entity) {
-  entity.movement.velocity.x = 0;
-  entity.movement.velocity.y = 0;
+  entity.movement!.velocity.x = 0;
+  entity.movement!.velocity.y = 0;
 }
 
 function applyVelocity(
@@ -17,6 +17,7 @@ function applyVelocity(
   deltaTime: number
 ) {
   const { transform, movement } = entity;
+  if (!transform || !movement) return false;
 
   const vx = movement.velocity.x;
   const vz = movement.velocity.y;
@@ -80,6 +81,8 @@ export const MoveAlongPathSystem: ISystemFactory = world => {
           localPlayer,
           attributeSystem,
         } = entity;
+
+        if (!transform || !movement) continue;
 
         /*
          * PLAYER COMBAT MOVEMENT

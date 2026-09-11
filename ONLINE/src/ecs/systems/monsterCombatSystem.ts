@@ -1,12 +1,72 @@
 import type { Entity, ISystemFactory } from '../world';
-import { PlayerAction } from '../../common/objects/enum';
-
-const ATTACK_DURATION = 0.65;
-const DAMAGE_TIME = 0.30;
-const COOLDOWN = 0.80;
+import { MonsterActionType, PlayerAction } from '../../common/objects/enum';
 
 const PLAYER_DAMAGE = 10;
 const MONSTER_DAMAGE = 5;
+
+const PLAYER_ATTACK_COOLDOWN = 0.80;
+const MONSTER_ATTACK_COOLDOWN = 1.20;
+
+// Attack animation hit point. 0.50 means damage lands at the middle
+// of the real one-shot animation instead of at the end.
+const PLAYER_DAMAGE_RATIO = 0.50;
+const MONSTER_DAMAGE_RATIO = 0.58;
+
+function stop(entity: Entity) {
+  if (!entity.movement) return;
+  entity.movement.velocity.x = 0;
+  entity.movement.velocity.y = 0;
+  entity.movement.running = false;
+}
+
+function distance(a: Entity, b: Entity) {
+  if (!a.transform || !b.transform) return Infinity;
+  const dx = b.transform.pos.x - a.transform.pos.x;
+  const dz = b.transform.pos.z - a.transform.pos.z;
+  return Math.sqrt(dx * dx + dz * dz);
+}
+
+function normalPlayerAction(player: Entity) {
+  const female = player.attributeSystem?.isAboveZero('isFemale') ?? false;
+  return female
+    ? PlayerAction.PLAYER_STOP_FEMALE
+    : PlayerAction.PLAYER_STOP_MALE;
+}
+
+function getPlayerAttackDuration(player: Entity) {
+  const model = player.modelObject as any;
+  const measured = model?.getActionDuration?.(
+    PlayerAction.PLAYER_ATTACK_FIST
+  );
+
+  if (typeof measured === 'number' && measured > 0.10 && measured < 3) {
+    return measured;
+  }
+
+  return 0.65;
+}
+
+function requestEffect(
+  world: Parameters<ISystemFactory>[0],
+  caster: Entity,
+  target: Entity | null,
+  modelPath: string,
+  position: { x: number; y: number; z: number },
+  scale: number,
+  duration: number
+) {
+  if (!target) return;
+
+  world.addComponent(target, 'skillEffectRequest', {
+    caster,
+    target,
+    skillId: 0,
+    modelPath,
+    position,
+    scale,
+    duration,
+  });
+}
 
 export const MonsterCombatSystem: ISystemFactory = world => {
   const players = world.with(
@@ -19,127 +79,73 @@ export const MonsterCombatSystem: ISystemFactory = world => {
   const monsters = world.with(
     'monsterAI',
     'monsterHealth',
-    'transform'
+    'transform',
+    'movement',
+    'monsterAnimation'
   );
 
   return {
     update: () => {
-      const now =
-        world.gameTime.TotalGameTime.TotalSeconds;
+      const now = world.gameTime.TotalGameTime.TotalSeconds;
+      const localPlayer = world.playerEntity;
 
-      /*
-       * ========================================================
-       * PLAYER COMBAT
-       * ========================================================
-       */
-
+      // ============================================================
+      // PLAYER -> MONSTER
+      // ============================================================
       for (const player of players) {
         const combat = player.playerCombat;
+        const target = combat.target;
 
-        if (!combat) {
+        if (!target?.transform || !target.monsterHealth) {
+          combat.attacking = false;
+          combat.target = null;
           continue;
         }
 
-        const target = combat.target;
-
-        /*
-         * Target no longer exists or is dead.
-         */
         if (
-          !target?.transform ||
-          !target.monsterHealth ||
-          target.monsterHealth.current <= 0
+          target.monsterHealth.current <= 0 ||
+          target.monsterAI?.state === 'dead'
         ) {
           combat.attacking = false;
           combat.target = null;
-          combat.attackUntil = 0;
-          combat.damageAt = 0;
-          combat.damageApplied = false;
-
           continue;
         }
 
-        const dx =
-          target.transform.pos.x -
-          player.transform.pos.x;
+        const d = distance(player, target);
 
-        const dz =
-          target.transform.pos.z -
-          player.transform.pos.z;
-
-        const distance =
-          Math.sqrt(
-            dx * dx +
-            dz * dz
-          );
-
-        /*
-         * ======================================================
-         * IMPORTANT:
-         *
-         * DO NOT STOP PLAYER MOVEMENT HERE.
-         *
-         * MoveAlongPathSystem controls movement.
-         *
-         * If the player is outside attack range, simply wait
-         * for the player to reach the monster.
-         * ======================================================
-         */
-
-        if (
-          distance >
-          combat.attackRange
-        ) {
+        // Let the protected FIX5 movement system bring the player into range.
+        if (d > combat.attackRange) {
           combat.attacking = false;
           combat.damageApplied = false;
-
           continue;
         }
 
-        /*
-         * Face the monster.
-         */
-        player.transform.rot.y =
-          Math.atan2(
-            dz,
-            dx
-          ) + Math.PI / 2;
+        stop(player);
 
-        /*
-         * ======================================================
-         * START ATTACK
-         * ======================================================
-         */
+        // Face the monster before every attack.
+        const dx = target.transform.pos.x - player.transform.pos.x;
+        const dz = target.transform.pos.z - player.transform.pos.z;
+        player.transform.rot.y = Math.atan2(dz, dx) + Math.PI / 2;
 
+        // ------------------------------------------------------------
+        // Start one real one-shot attack animation.
+        // ------------------------------------------------------------
         if (
           !combat.attacking &&
-          now >=
-            combat.attackUntil +
-              COOLDOWN
+          now >= combat.attackUntil + PLAYER_ATTACK_COOLDOWN
         ) {
+          const duration = getPlayerAttackDuration(player);
+
           combat.attacking = true;
-
-          combat.attackUntil =
-            now +
-            ATTACK_DURATION;
-
-          combat.damageAt =
-            now +
-            DAMAGE_TIME;
-
-          combat.damageApplied =
-            false;
-
-          player.playerAnimation.action =
-            PlayerAction.PLAYER_ATTACK_FIST;
+          combat.damageApplied = false;
+          combat.attackUntil = now + duration;
+          combat.damageAt = now + duration * PLAYER_DAMAGE_RATIO;
+          player.playerAnimation.action = PlayerAction.PLAYER_ATTACK_FIST;
         }
 
-        /*
-         * ======================================================
-         * APPLY PLAYER DAMAGE
-         * ======================================================
-         */
-
+        // ------------------------------------------------------------
+        // Damage + character hit effect at the animation hit frame.
+        // ------------------------------------------------------------
         if (
           combat.attacking &&
           !combat.damageApplied &&
@@ -147,110 +153,111 @@ export const MonsterCombatSystem: ISystemFactory = world => {
         ) {
           combat.damageApplied = true;
 
-          target.monsterHealth.current =
-            Math.max(
+          if (
+            target.monsterHealth.current > 0 &&
+            target.monsterAI?.state !== 'dead'
+          ) {
+            target.monsterHealth.current = Math.max(
               0,
-              target.monsterHealth.current -
-                PLAYER_DAMAGE
+              target.monsterHealth.current - PLAYER_DAMAGE
             );
 
-          world.addComponent(
-            target,
-            'damageNumber',
-            {
+            world.addComponent(target, 'damageNumber', {
               amount: PLAYER_DAMAGE,
               time: now,
-            } as any
-          );
+            });
 
-          /*
-           * Monster died from this hit.
-           */
-          if (
-            target.monsterHealth.current <= 0
-          ) {
-            combat.attacking = false;
+            // Real MU effect converted from Effect/down_left_punch.bmd.
+            requestEffect(
+              world,
+              player,
+              target,
+              './game-assets/Effect/down_left_punch.glb',
+              {
+                x: target.transform.pos.x,
+                y: target.transform.pos.y + 0.30,
+                z: target.transform.pos.z,
+              },
+              0.55,
+              0.65
+            );
 
-            combat.target = null;
+            if (target.monsterHealth.current <= 0) {
+              const ai = target.monsterAI;
 
-            combat.attackUntil = 0;
+              if (ai) {
+                ai.target = null;
+                ai.lured = false;
+                ai.state = 'dead';
+                ai.attackUntil = 0;
+                ai.damageAt = 0;
+                ai.damageApplied = false;
+                ai.deathUntil = now + 1.5;
+              }
 
-            combat.damageAt = 0;
+              stop(target);
+              target.monsterAnimation.action = MonsterActionType.Die;
 
-            combat.damageApplied = false;
+              if (world.currentPointerTarget === target) {
+                world.currentPointerTarget = null;
+              }
+
+              combat.target = null;
+              combat.attacking = false;
+            }
           }
         }
 
-        /*
-         * ======================================================
-         * END ATTACK
-         * ======================================================
-         */
-
-        if (
-          combat.attacking &&
-          now >= combat.attackUntil
-        ) {
+        if (combat.attacking && now >= combat.attackUntil) {
           combat.attacking = false;
-
           combat.damageApplied = false;
+          player.playerAnimation.action = normalPlayerAction(player);
         }
       }
 
-      /*
-       * ========================================================
-       * MONSTER COMBAT
-       * ========================================================
-       */
-
+      // ============================================================
+      // MONSTER -> PLAYER
+      // ============================================================
       for (const monster of monsters) {
         const ai = monster.monsterAI;
 
-        if (
-          !ai ||
-          ai.state !== 'attack' ||
-          !ai.target
-        ) {
+        if (!ai || ai.state !== 'attack' || ai.target !== localPlayer) {
           continue;
         }
 
-        /*
-         * Only attack the local player for now.
-         */
-        if (
-          ai.target !==
-          world.playerEntity
-        ) {
+        if (monster.monsterHealth.current <= 0 || ai.state === 'dead') {
           continue;
         }
 
-        /*
-         * Attack animation is still running.
-         */
-        if (
-          now <
-          ai.attackUntil
-        ) {
-          continue;
+        if (now >= ai.damageAt && !ai.damageApplied) {
+          ai.damageApplied = true;
+
+          if (localPlayer) {
+            world.addComponent(localPlayer, 'damageNumber', {
+              amount: MONSTER_DAMAGE,
+              time: now,
+            });
+
+            // Budge Dragon is documented as a flame-attacking monster.
+            // This uses the FlameStrike BMD from the supplied MU Effect data.
+            requestEffect(
+              world,
+              monster,
+              localPlayer,
+              './game-assets/Effect/FlameStrike.glb',
+              {
+                x: localPlayer.transform!.pos.x,
+                y: localPlayer.transform!.pos.y + 0.25,
+                z: localPlayer.transform!.pos.z,
+              },
+              0.45,
+              0.90
+            );
+          }
         }
 
-        /*
-         * Damage was already applied.
-         */
-        if (ai.damageApplied) {
-          continue;
-        }
-
-        ai.damageApplied = true;
-
-        world.addComponent(
-          ai.target,
-          'damageNumber',
-          {
-            amount: MONSTER_DAMAGE,
-            time: now,
-          } as any
-        );
+        // IMPORTANT: do not change the monster AI movement/state machine here.
+        // The existing working MonsterAISystem owns the attack state transition.
       }
     },
   };

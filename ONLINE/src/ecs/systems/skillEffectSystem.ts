@@ -1,68 +1,85 @@
-import { TransformNode } from '../../libs/babylon/exports';
+import {
+  Quaternion,
+  TransformNode,
+} from '../../libs/babylon/exports';
+import { loadGLTF } from '../../common/modelLoader';
 import type { Entity, ISystemFactory } from '../world';
 
 type ActiveEffect = {
   root: TransformNode;
+  mesh: any;
   animationGroups: any[];
   expiresAt: number;
 };
 
 export const SkillEffectSystem: ISystemFactory = world => {
   const query = world.with('skillEffectRequest');
-  const active: ActiveEffect[] = [];
+  const activeEffects: ActiveEffect[] = [];
 
-  function spawn(request: NonNullable<Entity['skillEffectRequest']>) {
-    const fileName = request.modelPath.split('/').at(-1)!;
+  async function spawnEffect(event: Entity['skillEffectRequest']) {
+    try {
+      const gltf = await loadGLTF(event.modelPath, world);
 
-    const task = world.assetsManager.addMeshTask(
-      `mu-skill-effect-${fileName}-${Date.now()}`,
-      undefined,
-      request.modelPath,
-      ''
-    );
-
-    task.onSuccess = () => {
       const root = new TransformNode(
-        `mu-skill-effect-root-${Date.now()}`,
+        `muSkillEffect_${Date.now()}_${Math.random().toString(36).slice(2)}`,
         world.scene
       );
 
-      for (const mesh of task.loadedMeshes) {
-        mesh.parent = root;
-        mesh.isPickable = false;
-        mesh.alwaysSelectAsActiveMesh = true;
-      }
-
+      root.setParent(world.mapParent);
       root.position.set(
-        request.position.x,
-        request.position.y,
-        request.position.z
+        event.position.x,
+        event.position.y,
+        event.position.z
       );
-      root.scaling.setAll(request.scale);
 
-      for (const group of task.loadedAnimationGroups) {
+      // Effects are authored in MU/BMD orientation.
+      root.rotationQuaternion = Quaternion.FromEulerAngles(
+        -Math.PI / 2,
+        0,
+        0
+      );
+
+      root.scaling.setAll(event.scale ?? 1);
+
+      gltf.mesh.setParent(root);
+      gltf.mesh.position.setAll(0);
+      gltf.mesh.scaling.set(1, -1, 1);
+
+      for (const group of gltf.animationGroups) {
+        group.stop();
         group.reset();
-        group.play(false);
       }
 
-      const now = world.gameTime.TotalGameTime.TotalSeconds;
+      if (gltf.animationGroups.length > 0) {
+        // Attack effects are one-shot, exactly like MU skill effects.
+        gltf.animationGroups[0].play(false);
+      }
 
-      active.push({
+      activeEffects.push({
         root,
-        animationGroups: task.loadedAnimationGroups,
-        expiresAt: now + request.duration,
+        mesh: gltf.mesh,
+        animationGroups: gltf.animationGroups,
+        expiresAt:
+          world.gameTime.TotalGameTime.TotalSeconds +
+          (event.duration ?? 0.9),
       });
-    };
-
-    task.onError = (_task, message, exception) => {
+    } catch (error) {
       console.error(
-        `[SkillEffectSystem] Could not load ${request.modelPath}`,
-        message,
-        exception
+        '[SkillEffectSystem] Failed to load effect:',
+        event.modelPath,
+        error
       );
-    };
+    }
+  }
 
-    task.run(world.scene);
+  function disposeEffect(effect: ActiveEffect) {
+    for (const group of effect.animationGroups) {
+      group.stop();
+      group.dispose();
+    }
+
+    effect.mesh.dispose(false, true);
+    effect.root.dispose();
   }
 
   return {
@@ -70,20 +87,25 @@ export const SkillEffectSystem: ISystemFactory = world => {
       const now = world.gameTime.TotalGameTime.TotalSeconds;
 
       for (const entity of [...query]) {
-        const request = entity.skillEffectRequest;
-        if (!request) continue;
+        const event = entity.skillEffectRequest;
+        if (!event) continue;
 
+        // One request = one visual effect.
         world.removeComponent(entity, 'skillEffectRequest');
-        spawn(request);
+        void spawnEffect(event);
       }
 
-      for (let i = active.length - 1; i >= 0; i--) {
-        const effect = active[i];
+      for (let i = activeEffects.length - 1; i >= 0; i--) {
+        const effect = activeEffects[i];
 
-        if (now < effect.expiresAt) continue;
+        const animationFinished =
+          effect.animationGroups.length > 0 &&
+          effect.animationGroups.every(group => !group.isPlaying);
 
-        effect.root.dispose();
-        active.splice(i, 1);
+        if (now >= effect.expiresAt || animationFinished) {
+          disposeEffect(effect);
+          activeEffects.splice(i, 1);
+        }
       }
     },
   };

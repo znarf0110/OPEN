@@ -70,7 +70,7 @@ export class ModelObject {
 
   ParentBoneLink = -1;
 
-  private _node: TransformNode;
+  protected _node: TransformNode;
 
   gltf: {
     mesh: AbstractMesh;
@@ -117,6 +117,27 @@ export class ModelObject {
    * Babylon can have an animation group stopped/reset while
    * CurrentAction still contains the same action index.
    */
+  /**
+   * Returns the authored duration of an animation action in seconds.
+   * This is used by combat so damage is synchronized with the real BMD/GLB
+   * attack animation instead of using a guessed fixed duration.
+   */
+  getActionDuration(actionIndex: number): number {
+    const animationGroup = this.gltf?.animationGroups[actionIndex];
+    if (!animationGroup) return 0;
+
+    const animation =
+      animationGroup.targetedAnimations?.[0]?.animation;
+
+    const from = animationGroup.from ?? 0;
+    const to = animationGroup.to ?? 0;
+    const fps = animation?.framePerSecond ?? 25;
+
+    if (to <= from || fps <= 0) return 0;
+
+    return (to - from) / fps;
+  }
+
   playAction(
     actionIndex: number,
     loop: boolean = true
@@ -176,37 +197,6 @@ export class ModelObject {
       animationGroup.reset();
       animationGroup.play(loop);
     }
-  }
-
-  /**
-   * Returns the duration of one non-looping animation in seconds,
-   * taking the Babylon animation group's playback speed into account.
-   */
-  getActionDuration(actionIndex: number): number {
-    const group = this.gltf?.animationGroups[actionIndex];
-    if (!group) return 0;
-
-    const baseLength =
-      typeof (group as any).getLength === 'function'
-        ? Number((group as any).getLength())
-        : 0;
-
-    const speed = Math.max(0.01, Math.abs(group.speedRatio || 1));
-
-    return baseLength > 0 ? baseLength / speed : 0;
-  }
-
-  /**
-   * Force a one-shot action to restart from frame 0.
-   */
-  restartAction(actionIndex: number): void {
-    const group = this.gltf?.animationGroups[actionIndex];
-    if (!group) return;
-
-    this.CurrentAction = -1;
-    group.stop();
-    group.reset();
-    this.playAction(actionIndex, false);
   }
 
   load(gltf: {

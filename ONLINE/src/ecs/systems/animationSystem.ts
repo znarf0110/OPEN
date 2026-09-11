@@ -1,14 +1,7 @@
-import {
-  PlayerAction,
-  MonsterActionType,
-} from '../../common/objects/enum';
-
+import { PlayerAction, MonsterActionType } from '../../common/objects/enum';
 import type { IVector2Like } from '../../libs/babylon/exports';
-
 import type { ISystemFactory } from '../world';
-
 import { MUAttributeSystem } from '../../libs/attributeSystem';
-
 import { PlayerObject } from '../../common/playerObject';
 
 export const AnimationSystem: ISystemFactory = world => {
@@ -20,18 +13,14 @@ export const AnimationSystem: ISystemFactory = world => {
   );
 
   const playerAnimatableQuery =
-    world.with(
-      'modelObject',
-      'playerAnimation'
-    );
+    world.with('modelObject', 'playerAnimation');
 
-  const monsterAnimatableQuery =
-    world.with(
-      'modelObject',
-      'monsterAnimation',
-      'movement',
-      'monsterAI'
-    );
+  const monsterAnimatableQuery = world.with(
+    'modelObject',
+    'monsterAnimation',
+    'movement',
+    'monsterAI'
+  );
 
   function calculateAnimation(
     attributeSystem: MUAttributeSystem,
@@ -39,48 +28,23 @@ export const AnimationSystem: ISystemFactory = world => {
     running: boolean
   ) {
     const inSafeZone =
-      attributeSystem.isAboveZero(
-        'inSafeZone'
-      );
-
+      attributeSystem.isAboveZero('inSafeZone');
     const isFemale =
-      attributeSystem.isAboveZero(
-        'isFemale'
-      );
-
+      attributeSystem.isAboveZero('isFemale');
     const isFlying =
-      attributeSystem.isAboveZero(
-        'isFlying'
-      );
-
+      attributeSystem.isAboveZero('isFlying');
     const isSwimming =
-      attributeSystem.isAboveZero(
-        'isSwimming'
-      );
-
+      attributeSystem.isAboveZero('isSwimming');
     const isSpearEquipped =
-      attributeSystem.isAboveZero(
-        'isSpearEquipped'
-      );
+      attributeSystem.isAboveZero('isSpearEquipped');
 
     const isMoving =
-      velocity.x !== 0 ||
-      velocity.y !== 0;
-
-    /*
-     * ========================================================
-     * PLAYER STOP
-     * ========================================================
-     */
+      velocity.x !== 0 || velocity.y !== 0;
 
     if (!isMoving) {
-      if (isFlying) {
-        return PlayerAction.PLAYER_STOP_FLY;
-      }
-
-      if (isSpearEquipped) {
+      if (isFlying) return PlayerAction.PLAYER_STOP_FLY;
+      if (isSpearEquipped)
         return PlayerAction.PLAYER_STOP_SPEAR;
-      }
 
       if (isSwimming) {
         return isFemale
@@ -93,15 +57,7 @@ export const AnimationSystem: ISystemFactory = world => {
         : PlayerAction.PLAYER_STOP_MALE;
     }
 
-    /*
-     * ========================================================
-     * PLAYER MOVEMENT
-     * ========================================================
-     */
-
-    if (isFlying) {
-      return PlayerAction.PLAYER_FLY;
-    }
+    if (isFlying) return PlayerAction.PLAYER_FLY;
 
     if (isSwimming) {
       return running
@@ -110,9 +66,7 @@ export const AnimationSystem: ISystemFactory = world => {
     }
 
     if (inSafeZone) {
-      if (running) {
-        return PlayerAction.PLAYER_RUN;
-      }
+      if (running) return PlayerAction.PLAYER_RUN;
 
       return isFemale
         ? PlayerAction.PLAYER_WALK_FEMALE
@@ -136,28 +90,13 @@ export const AnimationSystem: ISystemFactory = world => {
       : PlayerAction.PLAYER_WALK_MALE;
   }
 
-  const lastPlayerActions =
-    new WeakMap<
-      object,
-      PlayerAction
-    >();
-
-  const lastMonsterActions =
-    new WeakMap<
-      object,
-      MonsterActionType
-    >();
+  const lastPlayerActions = new WeakMap<object, PlayerAction>();
+  const lastMonsterActions = new WeakMap<object, MonsterActionType>();
 
   return {
     update: () => {
       const now =
         world.gameTime.TotalGameTime.TotalSeconds;
-
-      /*
-       * ========================================================
-       * PLAYER ANIMATION STATE
-       * ========================================================
-       */
 
       for (const entity of playersQuery) {
         const {
@@ -166,44 +105,18 @@ export const AnimationSystem: ISystemFactory = world => {
           attributeSystem,
         } = entity;
 
-        const combat =
-          entity.playerCombat;
+        const combat = entity.playerCombat;
 
         const isMoving =
           movement.velocity.x !== 0 ||
           movement.velocity.y !== 0;
 
-        /*
-         * ======================================================
-         * MOVEMENT CANCELS ATTACK
-         *
-         * This is intentional.
-         *
-         * If the player starts moving:
-         *
-         * Attack -> cancelled
-         * Run/Walk -> immediately restored
-         * ======================================================
-         */
-
-        if (
-          combat?.attacking &&
-          isMoving
-        ) {
+        // Movement always cancels the current attack.
+        if (combat?.attacking && isMoving) {
           combat.attacking = false;
-
           combat.attackUntil = 0;
-
-          combat.damageAt = 0;
-
           combat.damageApplied = false;
         }
-
-        /*
-         * ======================================================
-         * ATTACK ANIMATION
-         * ======================================================
-         */
 
         if (
           combat?.attacking &&
@@ -211,26 +124,13 @@ export const AnimationSystem: ISystemFactory = world => {
         ) {
           playerAnimation.action =
             PlayerAction.PLAYER_ATTACK_FIST;
-
           continue;
         }
 
-        /*
-         * Attack finished.
-         */
-        if (
-          combat?.attacking
-        ) {
+        if (combat?.attacking) {
           combat.attacking = false;
-
           combat.damageApplied = false;
         }
-
-        /*
-         * ======================================================
-         * NORMAL MOVEMENT ANIMATION
-         * ======================================================
-         */
 
         playerAnimation.action =
           calculateAnimation(
@@ -240,12 +140,6 @@ export const AnimationSystem: ISystemFactory = world => {
           );
       }
 
-      /*
-       * ========================================================
-       * PLAY PLAYER ANIMATIONS
-       * ========================================================
-       */
-
       for (const {
         playerAnimation,
         modelObject,
@@ -253,18 +147,16 @@ export const AnimationSystem: ISystemFactory = world => {
         const playerObject =
           modelObject as PlayerObject;
 
-        if (!playerObject.Ready) {
-          continue;
-        }
+        if (!playerObject.Ready) continue;
 
         const isAttack =
           playerAnimation.action ===
           PlayerAction.PLAYER_ATTACK_FIST;
 
-        /*
-         * Normal player animation speed.
-         */
-        if (
+        if (playerAnimation.action === PlayerAction.PLAYER_ATTACK_FIST) {
+          // Attack animations must run at the authored MU speed.
+          playerObject.AnimationSpeed = 14;
+        } else if (
           playerAnimation.action >=
             PlayerAction.PLAYER_WALK_MALE &&
           playerAnimation.action <=
@@ -274,15 +166,8 @@ export const AnimationSystem: ISystemFactory = world => {
         }
 
         const previousPlayerAction =
-          lastPlayerActions.get(
-            playerObject
-          );
+          lastPlayerActions.get(playerObject);
 
-        /*
-         * Movement animations loop.
-         * Attack is a one-shot and must not remain the
-         * active looping animation.
-         */
         if (
           previousPlayerAction !==
           playerAnimation.action
@@ -291,16 +176,12 @@ export const AnimationSystem: ISystemFactory = world => {
             playerAnimation.action,
             !isAttack
           );
-
           lastPlayerActions.set(
             playerObject,
             playerAnimation.action
           );
         }
 
-        /*
-         * Wings animation.
-         */
         if (playerObject.Wings) {
           playerObject.Wings.AnimationSpeed =
             playerObject.CurrentAction < 15
@@ -309,56 +190,43 @@ export const AnimationSystem: ISystemFactory = world => {
         }
       }
 
-      /*
-       * ========================================================
-       * MONSTER ANIMATION
-       * ========================================================
-       */
-
       for (const {
         monsterAnimation,
         movement,
         modelObject,
         monsterAI,
       } of monsterAnimatableQuery) {
-        if (!modelObject.Ready) {
-          continue;
-        }
+        if (!modelObject.Ready) continue;
 
-        /*
-         * Do not overwrite Attack1 while
-         * the monster is actually attacking.
-         */
+        const isMoving =
+          movement.velocity.x !== 0 ||
+          movement.velocity.y !== 0;
+
         if (
-          monsterAI.state !==
-          'attack'
+          monsterAI.state !== 'attack' &&
+          isMoving
         ) {
-          const isMoving =
-            movement.velocity.x !== 0 ||
-            movement.velocity.y !== 0;
-
-          if (isMoving) {
-            monsterAnimation.action =
-              MonsterActionType.Walk;
-          } else {
-            monsterAnimation.action =
-              MonsterActionType.Stop1;
-          }
+          monsterAnimation.action =
+            MonsterActionType.Walk;
+        } else if (
+          monsterAI.state !== 'attack'
+        ) {
+          monsterAnimation.action =
+            MonsterActionType.Stop1;
         }
 
         const isAttack =
           monsterAnimation.action ===
           MonsterActionType.Attack1;
 
-        const previousMonsterAction =
-          lastMonsterActions.get(
-            modelObject
-          );
+        if (isAttack) {
+          // Play the authored monster attack at normal speed.
+          modelObject.AnimationSpeed = 14;
+        }
 
-        /*
-         * Change animation only when
-         * the requested action changes.
-         */
+        const previousMonsterAction =
+          lastMonsterActions.get(modelObject);
+
         if (
           previousMonsterAction !==
           monsterAnimation.action
@@ -367,7 +235,6 @@ export const AnimationSystem: ISystemFactory = world => {
             monsterAnimation.action,
             !isAttack
           );
-
           lastMonsterActions.set(
             modelObject,
             monsterAnimation.action

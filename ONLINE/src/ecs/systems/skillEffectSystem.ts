@@ -74,28 +74,6 @@ function getFlatDirection(caster: Entity, target: Entity) {
   return direction;
 }
 
-function rotateY(v: Vector3, yaw: number) {
-  const c = Math.cos(yaw);
-  const s = Math.sin(yaw);
-
-  return new Vector3(
-    v.x * c - v.z * s,
-    v.y,
-    v.x * s + v.z * c
-  );
-}
-
-function getVisualOrigin(caster: Entity) {
-  const p = caster.transform!.pos;
-  const offset = caster.transform!.posOffset;
-
-  return new Vector3(
-    p.x + (offset?.x ?? 0),
-    p.y + (offset?.y ?? 0),
-    p.z + (offset?.z ?? 0)
-  );
-}
-
 /**
  * Find the actual animated head/mouth-side bone instead of guessing from
  * the monster bounding box.
@@ -109,102 +87,57 @@ function getDragonMouthPosition(
   caster: Entity,
   direction: Vector3
 ) {
-  const transform = caster.transform!;
-  const visualOrigin = getVisualOrigin(caster);
-  const skeleton = caster.modelObject?.gltf?.skeleton;
-
-  if (!skeleton || skeleton.bones.length === 0) {
+  const fallback = () => {
+    const p = caster.transform!.pos;
     return new Vector3(
-      visualOrigin.x + direction.x * 0.32,
-      visualOrigin.y + 0.62,
-      visualOrigin.z + direction.z * 0.32
+      p.x + direction.x * 0.32,
+      p.y + 0.95,
+      p.z + direction.z * 0.32
     );
-  }
+  };
 
-  const modelYaw =
-    Math.PI * 2 - (transform.rot?.y ?? 0);
+  const model = caster.modelObject?.gltf?.mesh;
+  if (!model) return fallback();
 
-  const candidates: Array<{
-    boneIndex: number;
-    local: Vector3;
-    score: number;
-  }> = [];
+  /*
+   * IMPORTANT:
+   * Do not use a skeleton bone here.
+   *
+   * Monster03.glb has generic bone names (bone_0, bone_1, ...), so
+   * guessing a "head-side" bone is not reliable. FIX #16 proved this
+   * can select a bone near the legs.
+   *
+   * Instead, use the ACTUAL rendered Budge Dragon bounds only to get
+   * the dragon's visible height, then place the mouth at a calibrated
+   * point near the upper/front part of the rendered model.
+   */
+  model.computeWorldMatrix(true);
 
-  const locals: Vector3[] = [];
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
+  const bounds = model.getHierarchyBoundingVectors(true);
+  const min = bounds.min;
+  const max = bounds.max;
 
-  for (let i = 0; i < skeleton.bones.length; i++) {
-    const node = skeleton.bones[i]?.getTransformNode();
-    if (!node) continue;
+  const height = Math.max(0.1, max.y - min.y);
 
-    node.computeWorldMatrix(true);
-    const worldPos = node.getAbsolutePosition();
-    const worldRelative = worldPos.subtract(visualOrigin);
-    const local = rotateY(worldRelative, -modelYaw);
+  /*
+   * Budge Dragon mouth calibration:
+   * - ~76% up from the feet
+   * - ~20% of model height forward from the body center
+   *
+   * These values are in WORLD space, so they remain correct when the
+   * monster is scaled by BudgeDragon.OverrideScale.
+   */
+  const mouthY = min.y + height * 0.76;
+  const forward = height * 0.20;
 
-    locals.push(local);
-    minY = Math.min(minY, local.y);
-    maxY = Math.max(maxY, local.y);
-  }
+  const centerX = (min.x + max.x) * 0.5;
+  const centerZ = (min.z + max.z) * 0.5;
 
-  const height = Math.max(0.001, maxY - minY);
-
-  for (let i = 0; i < locals.length; i++) {
-    const local = locals[i];
-    const yNorm = (local.y - minY) / height;
-    const horizontal = Math.hypot(local.x, local.z);
-
-    // Mouth/head area: above the torso, but below the very top/horns.
-    if (yNorm < 0.52 || yNorm > 0.90) continue;
-
-    // The Budge Dragon's mouth is on the forward side of the head.
-    // Prefer bones with positive local-Z and reject bones buried in the body.
-    const forwardNorm = local.z / Math.max(0.05, height);
-    const sideNorm = Math.abs(local.x) / Math.max(0.05, height);
-
-    const yPreference =
-      1 - Math.abs(yNorm - 0.70) / 0.20;
-
-    const score =
-      yPreference * 2.0 +
-      forwardNorm * 4.0 -
-      sideNorm * 1.2 +
-      Math.min(horizontal / height, 1) * 0.15;
-
-    candidates.push({
-      boneIndex: i,
-      local,
-      score,
-    });
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-
-  const best = candidates[0];
-  if (!best) {
-    return new Vector3(
-      visualOrigin.x + direction.x * 0.32,
-      visualOrigin.y + 0.62,
-      visualOrigin.z + direction.z * 0.32
-    );
-  }
-
-  // Keep the effect just outside the mouth so the fire texture does not
-  // clip through the dragon's head.
-  const mouthLocal = best.local.add(
-    new Vector3(0, 0.015 * height, 0.055 * height)
+  return new Vector3(
+    centerX + direction.x * forward,
+    mouthY,
+    centerZ + direction.z * forward
   );
-
-  const mouthWorld =
-    visualOrigin.add(rotateY(mouthLocal, modelYaw));
-
-  // The selected bone is the authoritative origin. Only a very small
-  // directional push is added; the old large forward offset is gone.
-  mouthWorld.x += direction.x * 0.06;
-  mouthWorld.z += direction.z * 0.06;
-
-  return mouthWorld;
 }
 
 export const SkillEffectSystem: ISystemFactory = world => {
@@ -272,9 +205,16 @@ export const SkillEffectSystem: ISystemFactory = world => {
       (target.z - mouth.z) ** 2
     );
 
+    /*
+     * ONE plane = ONE continuous dragon breath.
+     *
+     * The original flamestani texture already contains the complete
+     * fire-breath shape. The old implementation split it into four
+     * planes, which is why four separate fireballs appeared in-game.
+     */
     const breathLength = Math.min(
-      2.15,
-      Math.max(0.65, distance * 0.78)
+      2.4,
+      Math.max(0.75, distance * 0.82)
     );
 
     const root = new TransformNode(
@@ -290,72 +230,76 @@ export const SkillEffectSystem: ISystemFactory = world => {
       direction.z
     );
 
-    const segments: FireSegment[] = [];
-    const meshes: any[] = [];
+    const texture = getFireTexture(0);
 
-    // The original flamestani artwork is already a horizontal fire streak.
-    // Fewer, larger pieces make it read as one breath instead of four balls.
-    const layout = [
-      { at: 0.05, width: 0.78, height: 0.34, phase: 0 },
-      { at: 0.30, width: 0.72, height: 0.31, phase: 1 },
-      { at: 0.55, width: 0.62, height: 0.27, phase: 2 },
-      { at: 0.78, width: 0.50, height: 0.23, phase: 3 },
-    ];
+    /*
+     * The original texture is bright on its RIGHT side.
+     * Flip U so the bright/fire-head side starts at the dragon's mouth
+     * and the flame tapers toward the player.
+     */
+    texture.uScale = -1;
+    texture.uOffset = 1;
+    texture.vScale = 0.25;
+    texture.vOffset = 0;
 
-    layout.forEach((item, index) => {
-      const texture = getFireTexture(index);
-      const material = makeSpriteMaterial(
-        `muDragonBreathMaterial_${Date.now()}_${index}`,
-        texture
-      );
+    const material = makeSpriteMaterial(
+      `muDragonBreathMaterial_${Date.now()}`,
+      texture
+    );
 
-      const plane = CreatePlane(
-        `muDragonBreath_${Date.now()}_${index}`,
-        { width: 1, height: 1 },
-        world.scene
-      );
+    const plane = CreatePlane(
+      `muDragonBreath_${Date.now()}`,
+      { width: 1, height: 1 },
+      world.scene
+    );
 
-      plane.setParent(root);
-      plane.position.set(
-        0,
-        0,
-        breathLength * item.at
-      );
-      plane.billboardMode = 7;
-      plane.isPickable = false;
-      plane.alwaysSelectAsActiveMesh = true;
-      plane.material = material;
-      plane.scaling.set(
-        item.width,
-        item.height,
-        1
-      );
+    plane.setParent(root);
+    plane.position.set(
+      0,
+      0,
+      breathLength * 0.5
+    );
 
-      meshes.push(plane);
-      segments.push({
-        plane,
-        material,
-        texture,
-        distance: breathLength * item.at,
-        at: item.at,
-        width: item.width,
-        height: item.height,
-        phase: item.phase,
-      });
-    });
+    /*
+     * Do NOT billboard the breath.
+     * The plane is rotated by the dragon->player direction so it is
+     * an actual directional stream instead of a floating screen sprite.
+     */
+    plane.billboardMode = 0;
+    plane.isPickable = false;
+    plane.alwaysSelectAsActiveMesh = true;
+    plane.material = material;
+
+    const width = breathLength;
+    const height = Math.max(0.24, Math.min(0.46, breathLength * 0.22));
+
+    plane.scaling.set(
+      width,
+      height,
+      1
+    );
 
     const now =
       world.gameTime.TotalGameTime.TotalSeconds;
 
     active.push({
       root,
-      meshes,
+      meshes: [plane],
       startedAt: now,
       expiresAt: now + 0.58,
       kind: 'dragon-fire',
       caster: event.caster,
       target: event.target,
-      segments,
+      segments: [{
+        plane,
+        material,
+        texture,
+        distance: breathLength * 0.5,
+        at: 0.5,
+        width,
+        height,
+        phase: 0,
+      }],
     });
   }
 
@@ -501,31 +445,35 @@ export const SkillEffectSystem: ISystemFactory = world => {
             Math.max(0.65, distance * 0.78)
           );
 
-          const fadeIn = Math.min(1, age / 0.05);
+          const fadeIn = Math.min(1, age / 0.04);
           const fadeOut =
-            age > 0.44
-              ? Math.max(0, 1 - (age - 0.44) / 0.14)
+            age > 0.46
+              ? Math.max(0, 1 - (age - 0.46) / 0.12)
               : 1;
 
-          const pulse =
-            0.96 + Math.sin(age * 38) * 0.04;
+          const frame =
+            Math.floor(age / 0.10) % 4;
 
-          effect.segments?.forEach(
-            segment => {
-              const frame =
-                (Math.floor(age / 0.095) +
-                  segment.phase) % 4;
+          const texture =
+            effect.segments?.[0]?.texture;
 
-              segment.texture.vOffset =
-                frame * 0.25;
+          const material =
+            effect.segments?.[0]?.material;
 
-              segment.material.alpha =
-                fadeIn * fadeOut * pulse;
+          const plane =
+            effect.segments?.[0]?.plane;
 
-              segment.plane.position.z =
-                breathLength * segment.at;
-            }
-          );
+          if (texture && material && plane) {
+            texture.vOffset = frame * 0.25;
+            material.alpha =
+              fadeIn * fadeOut;
+
+            plane.position.z =
+              breathLength * 0.5;
+
+            plane.scaling.x =
+              breathLength;
+          }
         } else {
           const t = Math.min(
             1,

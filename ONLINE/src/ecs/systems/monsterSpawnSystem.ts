@@ -114,13 +114,14 @@ function createMonster(
   const factory = BudgeDragon;
 
   const monster = world.add({
-    worldIndex: ENUM_WORLD.WD_0LORENCIA,
-    transform: {
-      pos: new Vector3(
-        pos.x,
-        world.getTerrainHeight(pos.x, pos.z),
-        pos.z
-      ),
+  worldIndex: ENUM_WORLD.WD_0LORENCIA,
+
+  transform: {
+    pos: new Vector3(
+      pos.x,
+      world.getTerrainHeight(pos.x, pos.z) + 1.2,
+      pos.z
+    ),
       rot: new Vector3(0, 0, 0),
       scale: factory.OverrideScale >= 0 ? factory.OverrideScale : 1,
       posOffset: new Vector3(0.5, 0, 0.5),

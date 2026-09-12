@@ -234,11 +234,11 @@ export const SkillEffectSystem: ISystemFactory = world => {
 
     /*
      * The original texture is bright on its RIGHT side.
-     * Flip U so the bright/fire-head side starts at the dragon's mouth
-     * and the flame tapers toward the player.
+     * Keep the original U direction so the flame-head side is at the
+     * dragon's mouth and the tapered side points toward the player.
      */
-    texture.uScale = -1;
-    texture.uOffset = 1;
+    texture.uScale = 1;
+    texture.uOffset = 0;
     texture.vScale = 0.25;
     texture.vOffset = 0;
 
@@ -266,6 +266,11 @@ export const SkillEffectSystem: ISystemFactory = world => {
      * an actual directional stream instead of a floating screen sprite.
      */
     plane.billboardMode = 0;
+    // CreatePlane is an XY plane, so its width axis is local X.
+    // The dragon breath travels along the root's local Z direction.
+    // Rotate the plane 90 degrees so its long axis points forward with
+    // the dragon instead of appearing sideways/diagonal in the world.
+    plane.rotation.y = -Math.PI / 2;
     plane.isPickable = false;
     plane.alwaysSelectAsActiveMesh = true;
     plane.material = material;
